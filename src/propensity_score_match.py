@@ -16,8 +16,134 @@ import numpy as np
 import scipy as sp
 import pandas as pd
 
+from tqdm.auto import tqdm
+from sklearn.linear_model import LinearRegression
+
 sys.path.append('./src')
 from faers_processor import save_json, load_json, generate_file_md5, save_object, load_object
+
+# Methods for the basic linear regression model on all available features
+
+def resample_examples(X, y, min_unexposed = 10_000):
+
+    p = max(y.sum(), min_unexposed)/y.shape[0]
+    mask = np.where(np.squeeze(np.asarray((y.T + np.random.binomial(1, p, y.shape[0])) > 0)))[0]
+
+    return X[mask,:], y[mask], mask
+
+def filter_features_by_tanimoto(X, y, min_t = 0, max_t = 0.4):
+    intersection = (y.multiply(X)).sum(axis=0)
+    union = y.sum() + X.sum(axis=0) - intersection
+    tanimoto = intersection / union
+
+    mask = np.where(np.squeeze(np.asarray(tanimoto > 0)) & np.squeeze(np.asarray(tanimoto < 0.4)))[0]
+
+    return X[:,mask], mask
+
+# Fits a linear model given the features
+def build_model(features, labels, i, tanimoto_filter):
+
+    i_features, i_labels, example_mask = resample_examples(features, labels[:,i])
+
+    if tanimoto_filter:
+        i_features, feature_mask = filter_features_by_tanimoto(i_features, i_labels, 0, 0.4)
+        feature_masks.append(feature_mask)
+
+    if i_labels.sum() == 0 or (tanimoto_filter and len(feature_mask) == 0):
+        return None
+
+    i_labels = i_labels.toarray()
+
+    lr = LinearRegression()
+    lr.fit(i_features, i_labels)
+
+    return lr, i_features, i_labels
+
+def build_models(features, labels, max_iters=50, show_progress=True, tanimoto_filter=False):
+    models = list()
+
+    if not show_progress:
+        iterator = range(labels.shape[1])[:max_iters]
+    else:
+        iterator = tqdm(range(labels.shape[1])[:max_iters], bar_format='{l_bar}{bar:10}{r_bar}{bar:-10b}')
+
+    for i in iterator:
+
+        lr, i_features, i_labels = build_model(features, labels, i, tanimoto_filter)
+        models.append( lr )
+
+    if tanimoto_filter:
+        return models, feature_masks
+
+    return models
+
+# Method to resample the unexposed to match exposed using the fitted propensity score model
+def resample_using_model(lr, features, labels, nsamples = 100_000, nbins=100, min_unexposed=3, min_exposed=1, unexposed_exposed_ratio=3, use_lists=False):
+    if lr is None:
+        return {
+            "predictions": np.array([]),
+            "exposed_sample": np.array([]),
+            "unexposed_sample": np.array([]),
+            "exposed_mask": np.squeeze((labels==1).A)
+        }
+
+    # get trained PSM model and make predictions for all reports
+    predictions = lr.predict(features).squeeze()
+
+    # generate a boolean mask to identify exposed reports vs unexposed
+    exposed_mask = np.squeeze((labels==1).A)
+    nexposed = exposed_mask.sum()
+    #print(nexposed)
+
+    # identify the indexes that correspond to each group
+    exposed_indexes = np.where(exposed_mask)[0]
+    unexposed_indexes = np.where(~exposed_mask)[0]
+
+    # build a kernel based on the exposed data (we want to match this distr.)
+    try:
+        kernel = sp.stats.gaussian_kde(predictions[exposed_indexes])
+    except numpy.linalg.LinAlgError:
+        return {
+            "predictions": np.array([]),
+            "exposed_sample": np.array([]),
+            "unexposed_sample": np.array([]),
+            "exposed_mask": np.squeeze((labels==1).A)
+        }
+
+    counts, bins = np.histogram(kernel.resample(nsamples), bins=nbins)
+
+    # perform the resampling
+    unexposed_sample = np.array([], dtype=int)
+    exposed_sample = np.array([], dtype=int)
+
+    for i, lower_bound in enumerate(bins[:-1]):
+        upper_bound = bins[i+1]
+        in_bin = (lower_bound <= predictions) & (predictions < upper_bound)
+        exposed_in_bin = in_bin & exposed_mask
+        unexposed_in_bin = in_bin & ~exposed_mask
+
+        if unexposed_in_bin.sum() < min_unexposed or exposed_in_bin.sum() < min_exposed:
+            # too few samples for this bin, skipping
+            continue
+        else:
+            #ntosample = int(np.round(unexposed_exposed_ratio*nexposed*counts[i]/nsamples))
+            ntosample = int(unexposed_exposed_ratio*exposed_in_bin.sum())
+            sampled = np.random.choice(np.where(unexposed_in_bin)[0], ntosample, replace=True)
+            unexposed_sample = np.hstack([unexposed_sample, sampled])
+            exposed_sample = np.hstack([exposed_sample, np.where(exposed_in_bin)[0]])
+
+    if use_lists:
+        predictions = predictions.tolist()
+        exposed_sample = exposed_sample.tolist()
+        unexposed_sample = unexposed_sample.tolist()
+        exposed_mask = exposed_mask.tolist()
+
+    return {
+        "predictions": predictions,
+        "exposed_sample": exposed_sample,
+        "unexposed_sample": unexposed_sample,
+        "exposed_mask": exposed_mask
+    }
 
 def droprare(dataset_path, dataset_info, min_reports):
 
@@ -80,41 +206,61 @@ def get_labels(dataset_info, dataset_path, exposed_min):
 
     return labels, colnames
 
-def build_propensity_models(features, labels, colnames, args):
+def build_propensity_models(dataset_info, dataset_path, features, labels, colnames, n=10, k=100):
 
-    print(features.shape)
-    print(labels.shape)
-    print(len(colnames))
+    # Decompose the binary matrix using SVD/PCA and take the top k singular values
+    print(f"Building propensity score models.")
 
-    idx = 0
-    print(colnames[idx])
-    print(labels[:,idx].sum())
+    print(f"Using PCA to perform feature reduction on co-medications and indication matrix.")
+    U, S, VT = sp.sparse.linalg.svds(features.astype(float), k=k)
+    # Use the singular values to produce the pinciple components
+    PCs = (U @ sp.sparse.diags(S))
+    # Train linear propensity score models using this new feature space
+    print(f"Building propensity score models.")
+    models = build_models(PCs, labels, max_iters=labels.shape[1])
 
-    print(type(features))
-    print(type(features.tocsc()))
+    # resample the data to match between exposed and unexposed
+    print(f"Performing matching using the fitted models.")
+    match_data = dict()
+    too_few_samples = set()
+    too_few_controls = set()
 
-    print(features[:,0:4].shape)
-    b = labels[:,idx].toarray()
-    print(b.shape)
+    for i in tqdm(range(labels.shape[1]), bar_format='{l_bar}{bar:10}{r_bar}{bar:-10b}'):
+        samples = list()
+        for _ in range(n):
+            match = resample_using_model(models[i], PCs, labels[:,i], nbins=100, use_lists=True)
 
-    result = sp.sparse.linalg.lsqr(features, b)
-    x = result[0]
+            if len(match['exposed_sample']) < 10:
+                # too few samples
+                too_few_samples.add(i)
+                continue
+            elif len(set(match['unexposed_sample'])) <= 2*len(match['exposed_sample']):
+                # too few unique controls
+                too_few_controls.add(i)
+                continue
 
-    prediction = features @ x
-    # rmse = np.sqrt(np.mean((b-prediction)**2))
-    # error = np.abs(b-prediction)
-    print(type(prediction))
-    print(prediction.sum())
-    print(type(b), b.ravel().shape)
-    error = prediction-b.ravel()
-    # mean absolute error
-    print(np.abs(error).mean())
+            samples.append( match )
 
+        if len(samples) < n:
+            # didn't get enough samples
+            continue
 
+        match_data[i] = samples
 
-
-
-
+    psm_match_data_path = os.path.join(dataset_path, 'psm_match_data.pkl')
+    print(f"Saving matching data to file: {psm_match_data_path}")
+    save_object(psm_match_data_path, match_data)
+    dataset_info['match_data'] = {
+        'file': psm_match_data_path,
+        'md5': generate_file_md5(psm_match_data_path),
+        'n': n,
+        'k': k,
+        'ningredients_pass_qc': len(match_data),
+        'num_failed_too_few_samples': len(too_few_samples),
+        'num_failed_too_few_controls': len(too_few_controls)
+    }
+    print(f"Updating dataset.json file to include match data file.")
+    save_json(os.path.join(dataset_path, 'dataset.json'), dataset_info)
 
 def main():
     parser = argparse.ArgumentParser()
@@ -122,7 +268,8 @@ def main():
     parser.add_argument('--exposed-min', help='The minimum number of reports for an ingredient (ingredient_rxcui, route) to build a PSM for. Default is 10.', type=int, required=False, default=10)
     parser.add_argument('--feature-method', help="Which method to use to pre-process the features for propensity score matching.", type=str, default='droprare', required=False)
     parser.add_argument('--num-samples', help="The number of sets of controls that will be sampled using the propensity scores.", type=int, required=False, default=100)
-
+    parser.add_argument('-n', help="The number of times to match between cases and controls. Default is 10.", type=int, default=10, required=False)
+    parser.add_argument('-k', help="The number of singular values to use to generate the principle components. Default is 100.", type=int, default=100, required=False)
     # arguments specific to sub-methods and/or sub-steps
     parser.add_argument('--droprare-min', help="Used for 'droprare' feature method. The minimum number of reports for a feature to be included in the PSM. Default is 10.", type=int, required=False, default=10)
 
@@ -168,8 +315,8 @@ def main():
 
     required_dataset_files = ("reports_by_ingredients", "reports_by_drugs", "reports_by_indications")
     for fn in required_dataset_files:
-        if not os.path.exists(dataset_info[fn]['file']):
-            raise Exception(f"ERROR: Required dataset file: {fn} was not found in dataset: {args.dataset}")
+        if not os.path.exists(os.path.join(args.dataset, dataset_info[fn]['file'])):
+            raise Exception(f"ERROR: Required dataset file: {dataset_info[fn]['file']} was not found in dataset: {args.dataset}")
     print("ok")
 
     # pre-process the feature matrix
@@ -178,9 +325,9 @@ def main():
 
     # build psms
     print(f"Building propensity score models.")
-    labels, colnames = get_labels(dataset_info, args.exposed_min)
+    labels, colnames = get_labels(dataset_info, args.dataset, args.exposed_min)
 
-    build_propensity_models(features, labels, colnames, args)
+    build_propensity_models(dataset_info, args.dataset, features, labels, colnames, n=args.n, k=args.k)
 
 
 
