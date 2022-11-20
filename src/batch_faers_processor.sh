@@ -5,5 +5,6 @@
 
 for subpath in ./data/faers/$1/event/*
 do
-  echo bsub python3 src/faers_processor.py --endpoint $1 --subpath $(basename $subpath)
+  echo bsub -q normal -o $subpath/bsub.out -e $subpath/bsub.err python3 src/faers_processor.py --endpoint $1 --subpath $(basename $subpath)
+  sleep 2
 done

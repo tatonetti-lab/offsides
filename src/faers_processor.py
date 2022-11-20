@@ -268,7 +268,9 @@ def process(proc_status, proc_status_path, args, single_ep = None, single_subpat
                 processing_info = {}
                 save_json(processing_status_path, processing_info)
             else:
+                # loaded
                 processing_info = load_json(processing_status_path)
+
         else:
             # this works as a pointer and any changes made in this function
             # will change the proc_status dictionary
@@ -337,7 +339,17 @@ def process(proc_status, proc_status_path, args, single_ep = None, single_subpat
                     "reactions": os.path.join(event_dir, subpath, 'reactions.csv.gz'),
                     "log": os.path.join(event_dir, subpath, 'faers_processor.log')
                 }
-                save_json(proc_status_path, proc_status)
+                if local_processing_info:
+                    save_json(processing_status_path, processing_info)
+                else:
+                    save_json(proc_status_path, proc_status)
+            else:
+                if local_processing_info:
+                    # Running in single ep, single subpath mode. It is unusual
+                    # that the subpath is already in the json file, which means
+                    # that another job may have already started this run. We will
+                    # print an error message and quit.
+                    raise Exception("ERROR: Might have encountered a job in progress already. Quitting.")
 
             if processing_info[subpath]["status"] == "complete":
                 print(f"    > Processing for these files is already complete.")
@@ -361,7 +373,7 @@ def process(proc_status, proc_status_path, args, single_ep = None, single_subpat
 
                         for report in tqdm(data["results"]):
                             report_key_items = list()
-                            
+
                             save_json('./data/drug-event-report.json', report)
 
                             # extract report level data
