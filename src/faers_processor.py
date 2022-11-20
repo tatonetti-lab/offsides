@@ -101,7 +101,7 @@ def download(proc_status, proc_status_path, args):
     remote_download_info = json.loads(urlopen(DOWNLOAD_JSON_URL).read())
 
     for ep in endpoints_with_events:
-        if not args.endpoints == 'all' and not args.endpoints == ep:
+        if not args.endpoint == 'all' and not args.endpoint == ep:
             continue
 
         if not ep in proc_status["endpoints"]:
