@@ -313,20 +313,6 @@ def process(proc_status, proc_status_path, args, single_ep = None, single_subpat
 
             print(f"  Processing {subpath}...")
 
-            report_fh = gzip.open(os.path.join(event_dir, subpath, 'reports.csv.gz'), 'wt')
-            report_writer = csv.writer(report_fh)
-            report_writer.writerow(report_header)
-
-            rxn_fh = gzip.open(os.path.join(event_dir, subpath, 'reactions.csv.gz'), 'wt')
-            rxn_writer = csv.writer(rxn_fh)
-            rxn_writer.writerow(rxn_header)
-
-            drug_fh = gzip.open(os.path.join(event_dir, subpath, 'drugs.csv.gz'), 'wt')
-            drug_writer = csv.writer(drug_fh)
-            drug_writer.writerow(drug_header)
-
-            log_fh = open(os.path.join(event_dir, subpath, 'faers_processor.log'), 'w')
-
             zipjsons = [f for f in os.listdir(os.path.join(event_dir, subpath)) if f.endswith('.json.zip')]
 
             if not subpath in processing_info:
@@ -358,6 +344,20 @@ def process(proc_status, proc_status_path, args, single_ep = None, single_subpat
             print(f"    > Found {len(zipjsons)} archived json files.")
 
             start_time = time.time()
+
+            report_fh = gzip.open(os.path.join(event_dir, subpath, 'reports.csv.gz'), 'wt')
+            report_writer = csv.writer(report_fh)
+            report_writer.writerow(report_header)
+
+            rxn_fh = gzip.open(os.path.join(event_dir, subpath, 'reactions.csv.gz'), 'wt')
+            rxn_writer = csv.writer(rxn_fh)
+            rxn_writer.writerow(rxn_header)
+
+            drug_fh = gzip.open(os.path.join(event_dir, subpath, 'drugs.csv.gz'), 'wt')
+            drug_writer = csv.writer(drug_fh)
+            drug_writer.writerow(drug_header)
+
+            log_fh = open(os.path.join(event_dir, subpath, 'faers_processor.log'), 'w')
 
             for zjfn in zipjsons:
                 zjfp = os.path.join(event_dir, subpath, zjfn)
