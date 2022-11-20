@@ -161,7 +161,7 @@ def download(proc_status, proc_status_path, args):
     else:
         datadict = load_json(data_dict_path)
 
-def check_downloads(proc_status, proc_status_path):
+def check_downloads(proc_status, proc_status_path, args):
 
     print(f"Checking download status for files as of {proc_status['access_date']} ")
 
@@ -172,6 +172,9 @@ def check_downloads(proc_status, proc_status_path):
     # Perform a status check
     all_downloaded = True
     for ep in endpoints_with_events:
+        if not args.endpoint == 'all' and not args.endpoint == ep:
+            continue
+        
         status_info = proc_status["endpoints"][ep]
         num_downloaded = len([d for d in status_info["downloads"].values() if d['downloaded'] == 'yes'])
         print(f" {ep}: {num_downloaded} of {status_info['num_files']} total files downloaded successfully.")
