@@ -562,8 +562,7 @@ def main():
 
     if proc_status["downloaded"] == "no":
         download(proc_status, proc_status_path, args)
-
-    check_downloads(proc_status, proc_status_path, args)
+        check_downloads(proc_status, proc_status_path, args)
 
     #####
     # Process downloaded files
