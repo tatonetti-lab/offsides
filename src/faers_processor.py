@@ -198,6 +198,9 @@ def process(proc_status, proc_status_path, args, single_ep = None, single_subpat
     if not os.path.exists(RXNORM_P2I_PATH):
         raise Exception(f"ERROR: Necessary file, {RXNORM_P2I_PATH}, is missing. \n\nThe missing file can be downloaded as part of the latest OnSIDES Data Release (see github.com/tatonetti-lab/onsides/releases). The file is included as part of the onsides_VERSION_DATE.tar.gz archive. For example you can download with:\n\nwget https://github.com/tatonetti-lab/onsides/archive/refs/tags/v2.0.0.tar.gz\n\nDownload the archive and extract the 'rxnorm_product_to_ingredient.csv.gz' file to the local ./data directory.")
 
+    # will be set to True automatically in single_ep, single_subpath mode
+    local_processing_info = False
+
     # Load the RxNorm product to ingredient map
     print("Loading the RxNorm dictionary into memory.")
     product2ingredients = defaultdict(set)
@@ -248,8 +251,29 @@ def process(proc_status, proc_status_path, args, single_ep = None, single_subpat
 
     for ep in endpoints:
 
-        if not single_ep is None and not ep == single_ep:
+        if single_ep is not None and not ep == single_ep:
             continue
+
+        if not "processing" in proc_status["endpoints"][ep]:
+            proc_status["endpoints"][ep]["processing"] = {}
+
+        if single_ep is not None and single_subpath is not None:
+            # running in single iteration mode, likely for multiprocessing
+            # in this case we use a local version of the processing json
+            # to avoid conflicts
+            local_processing_info = True
+            processing_status_path = os.path.join(DATA_DIR, single_ep, "event", single_subpath, 'local_processing_status.json')
+            print(f"Running in single directory mode, will use a local status dictionary saved at {processing_status_path}.")
+            if not os.path.exists(processing_status_path):
+                processing_info = {}
+                save_json(processing_status_path, processing_info)
+            else:
+                processing_info = load_json(processing_status_path)
+        else:
+            # this works as a pointer and any changes made in this function
+            # will change the proc_status dictionary
+            processing_info = proc_status["endpoints"][ep]["processing"]
+
 
         print(f"Processing adverse event reports for '{ep}'")
 
@@ -303,11 +327,8 @@ def process(proc_status, proc_status_path, args, single_ep = None, single_subpat
 
             zipjsons = [f for f in os.listdir(os.path.join(event_dir, subpath)) if f.endswith('.json.zip')]
 
-            if not "processing" in proc_status["endpoints"][ep]:
-                proc_status["endpoints"][ep]["processing"] = {}
-
-            if not subpath in proc_status["endpoints"][ep]["processing"]:
-                proc_status["endpoints"][ep]["processing"][subpath] = {
+            if not subpath in processing_info:
+                processing_info[subpath] = {
                     "status": "in_progress",
                     "processing_time_min": "",
                     "num_files": len(zipjsons),
@@ -318,7 +339,7 @@ def process(proc_status, proc_status_path, args, single_ep = None, single_subpat
                 }
                 save_json(proc_status_path, proc_status)
 
-            if proc_status["endpoints"][ep]["processing"][subpath]["status"] == "complete":
+            if processing_info[subpath]["status"] == "complete":
                 print(f"    > Processing for these files is already complete.")
                 continue
 
@@ -340,7 +361,7 @@ def process(proc_status, proc_status_path, args, single_ep = None, single_subpat
 
                         for report in tqdm(data["results"]):
                             report_key_items = list()
-
+                            
                             save_json('./data/drug-event-report.json', report)
 
                             # extract report level data
@@ -484,9 +505,13 @@ def process(proc_status, proc_status_path, args, single_ep = None, single_subpat
 
                 # end "for zjfn in zipjsons"
 
-            proc_status["endpoints"][ep]["processing"][subpath]["status"] = "complete"
-            proc_status["endpoints"][ep]["processing"][subpath]["processing_time_min"] = (time.time()-start_time)/60.
-            save_json(proc_status_path, proc_status)
+            processing_info[subpath]["status"] = "complete"
+            processing_info[subpath]["processing_time_min"] = (time.time()-start_time)/60.
+
+            if local_processing_info:
+                save_json(processing_status_path, processing_info)
+            else:
+                save_json(proc_status_path, proc_status)
 
             # end "for subpath in subpaths:"
 
