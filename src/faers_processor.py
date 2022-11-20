@@ -174,7 +174,7 @@ def check_downloads(proc_status, proc_status_path, args):
     for ep in endpoints_with_events:
         if not args.endpoint == 'all' and not args.endpoint == ep:
             continue
-        
+
         status_info = proc_status["endpoints"][ep]
         num_downloaded = len([d for d in status_info["downloads"].values() if d['downloaded'] == 'yes'])
         print(f" {ep}: {num_downloaded} of {status_info['num_files']} total files downloaded successfully.")
@@ -526,7 +526,7 @@ def main():
     if proc_status["downloaded"] == "no":
         download(proc_status, proc_status_path, args)
 
-    check_downloads(proc_status, proc_status_path)
+    check_downloads(proc_status, proc_status_path, args)
 
     #####
     # Process downloaded files
