@@ -5,5 +5,5 @@
 
 for subpath in ./data/faers/$1/event/*
 do
-  echo bsub python3 src/faers_processor.py --endpoint $1 --subpath $subpath
+  echo bsub python3 src/faers_processor.py --endpoint $1 --subpath $(basename $subpath)
 done
