@@ -306,7 +306,6 @@ def process(proc_status, proc_status_path, args, single_ep = None, single_subpat
 
 
         for subpath in subpaths:
-
             # Code to allow for a single directory to processed
             if not single_subpath is None and not subpath == single_subpath:
                 continue
@@ -314,6 +313,14 @@ def process(proc_status, proc_status_path, args, single_ep = None, single_subpat
             print(f"  Processing {subpath}...")
 
             zipjsons = [f for f in os.listdir(os.path.join(event_dir, subpath)) if f.endswith('.json.zip')]
+
+            if not subpath in processing_info and not local_processing_info and os.path.exists(os.path.join(DATA_DIR, ep, "event", subpath, 'local_processing_status.json')):
+                # If not in single run mode and the status of this subpath is not in our primary
+                # status json file, then we check to see if there's a locally stored json file.
+                local_info = load_json(os.path.join(DATA_DIR, ep, "event", subpath, 'local_processing_status.json'))
+                if subpath in local_info:
+                    processing_info[subpath] = local_info[subpath]
+                    save_json(proc_status_path, proc_status)
 
             if not subpath in processing_info:
                 processing_info[subpath] = {
@@ -569,14 +576,14 @@ def main():
     #  - map products to ingredients
     #  - map adverse event terms to MedDRA identifiers
     #  - map MedDRA LLTs to PTs
-    #  - remove duplicates
+    #  - identify duplicates
     #  - build sparse matrix files for:
     #    - report x (ingredient, adminroute)
     #    - report x adverse_reaction
     #  - compile a meta data table for reports
     #####
 
-    process(proc_status, proc_status_path, args, single_ep = args.endpoint, single_subpath=args.subpath)
+    process(proc_status, proc_status_path, args, single_ep = args.endpoint, single_subpath = args.subpath)
 
 if __name__ == '__main__':
     main()
