@@ -502,7 +502,7 @@ def process(proc_status, proc_status_path, args, single_ep = None, single_subpat
                             error_code = 0
                             for row in reactions_data:
 
-                                if row['reactionmeddrapt'].lower() in term2pt:
+                                if row['reactionmeddrapt'] is not None and row['reactionmeddrapt'].lower() in term2pt:
                                     pt_meddra_id = term2pt[row['reactionmeddrapt'].lower()]
                                 else:
                                     error_code = 1
