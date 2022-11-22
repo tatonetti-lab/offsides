@@ -448,7 +448,11 @@ def process(proc_status, proc_status_path, args, single_ep = None, single_subpat
                                             if row["medicinalproduct"] in ("NO CONCURRENT MEDICATION", "HORMONE", "MULTI-VITAMIN", "COMMIT", "ALL OTHER THERAPEUTIC PRODUCTS", "[THERAPY UNSPECIFIED]"):
                                                 error_code = 3
 
-                                            match = drug_fuzzyset.get(drugname)[0]
+                                            result = drug_fuzzyset.get(drugname)
+                                            if result is None:
+                                                match = (0.0, '')
+                                            else:
+                                                match = result[0]
 
                                             # Some code to see what the score should be
                                             # See notebook for analysis.
