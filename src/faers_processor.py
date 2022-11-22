@@ -190,7 +190,7 @@ def check_downloads(proc_status, proc_status_path, args):
         proc_status["downloaded"] = "yes"
         save_json(proc_status_path, proc_status)
 
-def process(proc_status, proc_status_path, args, single_ep = None, single_subpath = None):
+def process(proc_status, proc_status_path, args, single_ep = 'all', single_subpath = None):
 
     if not proc_status["downloaded"] == "yes":
         print("WARNING: Processor status shows the files have not all downloaded. Will continue with processing but there may be missing data in the resulting files.")
@@ -251,13 +251,13 @@ def process(proc_status, proc_status_path, args, single_ep = None, single_subpat
 
     for ep in endpoints:
 
-        if single_ep is not None and not ep == single_ep:
+        if single_ep != 'all' and not ep == single_ep:
             continue
 
         if not "processing" in proc_status["endpoints"][ep]:
             proc_status["endpoints"][ep]["processing"] = {}
 
-        if single_ep is not None and single_subpath is not None:
+        if single_ep != 'all' and single_subpath is not None:
             # running in single iteration mode, likely for multiprocessing
             # in this case we use a local version of the processing json
             # to avoid conflicts
@@ -317,6 +317,7 @@ def process(proc_status, proc_status_path, args, single_ep = None, single_subpat
             if not subpath in processing_info and not local_processing_info and os.path.exists(os.path.join(DATA_DIR, ep, "event", subpath, 'local_processing_status.json')):
                 # If not in single run mode and the status of this subpath is not in our primary
                 # status json file, then we check to see if there's a locally stored json file.
+                print("  > Found local processing status file. Loading status from there into main file.")
                 local_info = load_json(os.path.join(DATA_DIR, ep, "event", subpath, 'local_processing_status.json'))
                 if subpath in local_info:
                     processing_info[subpath] = local_info[subpath]
@@ -349,7 +350,7 @@ def process(proc_status, proc_status_path, args, single_ep = None, single_subpat
                 continue
 
             print(f"    > Found {len(zipjsons)} archived json files.")
-
+            
             start_time = time.time()
 
             report_fh = gzip.open(os.path.join(event_dir, subpath, 'reports.csv.gz'), 'wt')
@@ -530,6 +531,10 @@ def process(proc_status, proc_status_path, args, single_ep = None, single_subpat
 
 
                 # end "for zjfn in zipjsons"
+            report_fh.close()
+            rxn_fh.close()
+            drug_fh.close()
+            log_fh.close()
 
             processing_info[subpath]["status"] = "complete"
             processing_info[subpath]["processing_time_min"] = (time.time()-start_time)/60.
@@ -589,8 +594,8 @@ def main():
     #    - report x adverse_reaction
     #  - compile a meta data table for reports
     #####
-
-    process(proc_status, proc_status_path, args, single_ep = args.endpoint, single_subpath = args.subpath)
+    if proc_status["processed"] == "no":
+        process(proc_status, proc_status_path, args, single_ep = args.endpoint, single_subpath = args.subpath)
 
 if __name__ == '__main__':
     main()
