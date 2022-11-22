@@ -436,45 +436,48 @@ def process(proc_status, proc_status_path, args, single_ep = None, single_subpat
                                     else:
                                         ingredient_rxcui = ingredient_rxcuis[0]
                                 else:
-                                    drugname = row["medicinalproduct"].lower()
-                                    if drugname in rxnames2rxcuis:
-                                        # exact match
-                                        ingredient_rxcui = rxnames2rxcuis[drugname]
+                                    if row["medicinalproduct"] is None:
+                                        error_code = 6
                                     else:
-                                        # find the closest match
-                                        if row["medicinalproduct"] in ("NO CONCURRENT MEDICATION", "HORMONE", "MULTI-VITAMIN", "COMMIT", "ALL OTHER THERAPEUTIC PRODUCTS", "[THERAPY UNSPECIFIED]"):
-                                            error_code = 3
-
-                                        match = drug_fuzzyset.get(row["medicinalproduct"].lower())[0]
-
-                                        # Some code to see what the score should be
-                                        # See notebook for analysis.
-                                        # print(row["medicinalproduct"])
-                                        # print(match)
-                                        # resp = input('Is this match correct? (y/N) ')
-                                        # if resp == 'y':
-                                        #     ingredient_rxcui = match[1]
-                                        #     correct_scores.append(match[0])
-                                        # else:
-                                        #     incorrect_scores.append(match[0])
-
-                                        # From the above analysis, we can recover about 12% of the missing
-                                        # reports with near perfect accuracy by using a threshold >= 0.75.
-                                        # We *could* recover 76% of missing reports with 66% precision if
-                                        # we use a threshold of >= 0.508.
-
-                                        # For now we are going with the high preicion approach.
-                                        # We will count how many are lost this way and then revisit if we
-                                        # need to increase our numbers.
-                                        if match[0] >= 0.750:
-                                            ingredient_rxcui = match[1]
-                                        elif match[0] >= 0.508:
-                                            missing_norxcui_matchle750gt508 += 1
-                                            missing_norxcui_matchtoolow += 1
-                                            error_code = 4
+                                        drugname = row["medicinalproduct"].lower()
+                                        if drugname in rxnames2rxcuis:
+                                            # exact match
+                                            ingredient_rxcui = rxnames2rxcuis[drugname]
                                         else:
-                                            missing_norxcui_matchtoolow += 1
-                                            error_code = 5
+                                            # find the closest match
+                                            if row["medicinalproduct"] in ("NO CONCURRENT MEDICATION", "HORMONE", "MULTI-VITAMIN", "COMMIT", "ALL OTHER THERAPEUTIC PRODUCTS", "[THERAPY UNSPECIFIED]"):
+                                                error_code = 3
+
+                                            match = drug_fuzzyset.get(drugname)[0]
+
+                                            # Some code to see what the score should be
+                                            # See notebook for analysis.
+                                            # print(row["medicinalproduct"])
+                                            # print(match)
+                                            # resp = input('Is this match correct? (y/N) ')
+                                            # if resp == 'y':
+                                            #     ingredient_rxcui = match[1]
+                                            #     correct_scores.append(match[0])
+                                            # else:
+                                            #     incorrect_scores.append(match[0])
+
+                                            # From the above analysis, we can recover about 12% of the missing
+                                            # reports with near perfect accuracy by using a threshold >= 0.75.
+                                            # We *could* recover 76% of missing reports with 66% precision if
+                                            # we use a threshold of >= 0.508.
+
+                                            # For now we are going with the high preicion approach.
+                                            # We will count how many are lost this way and then revisit if we
+                                            # need to increase our numbers.
+                                            if match[0] >= 0.750:
+                                                ingredient_rxcui = match[1]
+                                            elif match[0] >= 0.508:
+                                                missing_norxcui_matchle750gt508 += 1
+                                                missing_norxcui_matchtoolow += 1
+                                                error_code = 4
+                                            else:
+                                                missing_norxcui_matchtoolow += 1
+                                                error_code = 5
 
                                 ingredients_data.add( tuple([safetyreportid, ingredient_rxcui, error_code] + [row[p] for p in template["drug"]]) )
 
