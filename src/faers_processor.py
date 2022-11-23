@@ -548,6 +548,8 @@ def process(proc_status, proc_status_path, args, single_ep = 'all', single_subpa
 
 def check_process(proc_status, proc_status_path):
 
+    print("Checking completeness of processing...")
+    
     endpoints_complete = True
 
     for ep in proc_status["endpoints"].keys():
