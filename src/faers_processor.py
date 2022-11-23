@@ -350,7 +350,7 @@ def process(proc_status, proc_status_path, args, single_ep = 'all', single_subpa
                 continue
 
             print(f"    > Found {len(zipjsons)} archived json files.")
-            
+
             start_time = time.time()
 
             report_fh = gzip.open(os.path.join(event_dir, subpath, 'reports.csv.gz'), 'wt')
@@ -546,6 +546,41 @@ def process(proc_status, proc_status_path, args, single_ep = 'all', single_subpa
 
             # end "for subpath in subpaths:"
 
+def check_process(proc_status, proc_status_path):
+
+    endpoints_complete = True
+
+    for ep in proc_status["endpoints"].keys():
+
+        if not "processing" in proc_status["endpoints"][ep]:
+            # processing not started, will skip to next endpoint to check
+            endpoints_complete = False
+            continue
+
+        processing_info = proc_status["endpoints"][ep]["processing"]
+
+        subpaths_complete = True
+        for subpath in processing_info.keys():
+            if not processing_info[subpath]["status"] == "complete":
+                print(f"ERROR: Processing of {ep}/event/{subpath} is incomplete.")
+                subpaths_complete = False
+
+        subpath_dirs = set([d for d in os.path.listdir(os.path.join(DATA_DIR, ep, "event")) if os.path.isdir(os.path.join(DATA_DIR, ep, "event", d))])
+        for subpath in (subpath_dirs-set(processing_info.keys())):
+            print(f"ERROR: Processing of {ep}/event/{subpath} has not yet been initiated.")
+            subpaths_complete = False
+
+        if subpaths_complete:
+            proc_status["endpoints"][ep]["status"] = "processed"
+            save_json(proc_status_path, proc_status)
+        else:
+            endpoints_complete = False
+
+    if endpoints_complete:
+        print(f"All endpoints have been procsessed.")
+        proc_status["processed"] = "yes"
+        save_json(proc_status_path, proc_status)
+
 def main():
 
     parser = argparse.ArgumentParser()
@@ -596,6 +631,7 @@ def main():
     #####
     if proc_status["processed"] == "no":
         process(proc_status, proc_status_path, args, single_ep = args.endpoint, single_subpath = args.subpath)
+        check_process(proc_status, proc_status_path)
 
 if __name__ == '__main__':
     main()
