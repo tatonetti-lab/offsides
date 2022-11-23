@@ -565,7 +565,7 @@ def check_process(proc_status, proc_status_path):
                 print(f"ERROR: Processing of {ep}/event/{subpath} is incomplete.")
                 subpaths_complete = False
 
-        subpath_dirs = set([d for d in os.path.listdir(os.path.join(DATA_DIR, ep, "event")) if os.path.isdir(os.path.join(DATA_DIR, ep, "event", d))])
+        subpath_dirs = set([d for d in os.listdir(os.path.join(DATA_DIR, ep, "event")) if os.path.isdir(os.path.join(DATA_DIR, ep, "event", d))])
         for subpath in (subpath_dirs-set(processing_info.keys())):
             print(f"ERROR: Processing of {ep}/event/{subpath} has not yet been initiated.")
             subpaths_complete = False
