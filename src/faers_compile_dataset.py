@@ -82,12 +82,12 @@ def build_dataset(proc_status, endpoint, start_year, end_year):
     subpaths_to_compile = sorted(subpaths_to_compile)
 
     if all_subpaths:
-        dataset_prefix = f"{endpoint}_{min(subpaths_to_compile)}-{min(subpaths_to_compile)}"
+        dataset_prefix = f"{endpoint}_{min(subpaths_to_compile)}-{max(subpaths_to_compile)}"
     else:
         dataset_prefix = f"{endpoint}_{start_year}-{end_year}"
 
     print(f"Data files will be saved to {os.path.join(DATA_DIR, 'datasets', dataset_prefix)}")
-    
+
     print(f"Data are available and ready to compile into a dataset.")
 
     # First, we load the reports and remove duplicates
