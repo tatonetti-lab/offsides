@@ -630,6 +630,8 @@ def clean(proc_status, proc_status_path, args):
                 os.unlink(fp)
             print("Resetting processing...")
             del(proc_status["endpoints"][ep]["processing"])
+            proc_status["endpoints"][ep]["status"] = ["downloaded"]
+            proc_status["processed"] = "no"
             save_json(proc_status_path, proc_status)
 
 def main():
