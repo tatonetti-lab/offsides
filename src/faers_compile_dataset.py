@@ -71,6 +71,9 @@ def build_dataset(proc_status, endpoint, start_year, end_year):
                 subpaths_to_compile.append(subpath)
     else:
         for subpath in processing_info.keys():
+            if subpath == 'all_other':
+                continue
+            
             for fk in ("reports", "drugs", "reactions"):
                 if not os.path.exists(processing_info[subpath][fk]):
                     raise Exception(f"ERROR: Expected data file at {processing_info[subpath][fk]} does not exist.")
