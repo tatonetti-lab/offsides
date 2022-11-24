@@ -146,14 +146,14 @@ def build_dataset(proc_status, endpoint, start_year, end_year):
 
 def main():
     parser = argparse.ArgumentParser()
-    parser.add_argument('--endpoint', default='drug', help='Which endpoints to download For a list of available endpoints see the keys in the results section of the download.json file. Defautl is all endpoints.', type=str, required=True)
-    parser.add_argument('--years', default=None, help="Restrict dataset to a given set of years. Must be provided in the following format: YYYY-YYYY or for an individual year: YYYY")
+    parser.add_argument('--endpoint', type=str, default='drug', help='Which endpoints to download For a list of available endpoints see the keys in the results section of the download.json file. Defautl is all endpoints.', type=str, required=True)
+    parser.add_argument('--years', type=int, default=None, help="Restrict dataset to a given set of years. Must be provided in the following format: YYYY-YYYY or for an individual year: YYYY")
 
     args = parser.parse_args()
 
     if args.years is None:
         start_year = 2004 # the first year FAERS makes data available for
-        end_year = datetime.now().strftime('%Y')
+        end_year = int(datetime.now().strftime('%Y'))
     elif args.years.find('-') == -1:
         start_year = end_year = int(args.years)
     else:
