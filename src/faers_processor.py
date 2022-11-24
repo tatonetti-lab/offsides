@@ -43,6 +43,16 @@ DRUGEVENT_YAML_URL = 'https://open.fda.gov/fields/drugevent.yaml'
 RXNORM_P2I_PATH  = './data/rxnorm_product_to_ingredient.csv.gz'
 MEDDRA_PT_LLT_PATH = './data/meddra_llt_pt_map.txt'
 
+def generate_file_md5(filename, blocksize=2**20):
+    m = hashlib.md5()
+    with open( filename , "rb" ) as f:
+        while True:
+            buf = f.read(blocksize)
+            if not buf:
+                break
+            m.update( buf )
+    return m.hexdigest()
+
 def load_json(filename):
     fh = open(filename)
     data = json.loads(fh.read())
@@ -101,7 +111,7 @@ def download(proc_status, proc_status_path, args):
     remote_download_info = json.loads(urlopen(DOWNLOAD_JSON_URL).read())
 
     for ep in endpoints_with_events:
-        if not args.endpoint == 'all' and not args.endpoint == ep:
+        if args.endpoint != 'all' and not args.endpoint == ep:
             continue
 
         if not ep in proc_status["endpoints"]:
@@ -130,6 +140,10 @@ def download(proc_status, proc_status_path, args):
                 local_filepath = os.path.join(parts_dir, filename)
             else:
                 local_filepath = os.path.join(parts_dir, sub_dir, filename)
+
+            if args.endpoint != 'all' and args.subpath != None and args.subpath != sub_dir:
+                continue
+
 
             Path(os.path.split(local_filepath)[0]).mkdir(parents=True, exist_ok=True)
 
@@ -367,7 +381,7 @@ def process(proc_status, proc_status_path, args, single_ep = 'all', single_subpa
 
             log_fh = open(os.path.join(event_dir, subpath, 'faers_processor.log'), 'w')
 
-            for zjfn in zipjsons:
+            for zjfn in sorted(zipjsons):
                 zjfp = os.path.join(event_dir, subpath, zjfn)
                 with zipfile.ZipFile(zjfp, "r") as z:
                     if len(z.namelist()) > 1:
@@ -475,7 +489,8 @@ def process(proc_status, proc_status_path, args, single_ep = 'all', single_subpa
                                             # We will count how many are lost this way and then revisit if we
                                             # need to increase our numbers.
                                             if match[0] >= 0.750:
-                                                ingredient_rxcui = match[1]
+                                                ingredient_rxcui = rxnames2rxcuis[match[1]]
+                                                error_code = 7
                                             elif match[0] >= 0.508:
                                                 missing_norxcui_matchle750gt508 += 1
                                                 missing_norxcui_matchtoolow += 1
@@ -549,10 +564,13 @@ def process(proc_status, proc_status_path, args, single_ep = 'all', single_subpa
 def check_process(proc_status, proc_status_path):
 
     print("Checking completeness of processing...")
-    
+
     endpoints_complete = True
 
     for ep in proc_status["endpoints"].keys():
+
+        if not ep in proc_status["endpoints"]:
+            continue
 
         if not "processing" in proc_status["endpoints"][ep]:
             # processing not started, will skip to next endpoint to check
@@ -583,11 +601,43 @@ def check_process(proc_status, proc_status_path):
         proc_status["processed"] = "yes"
         save_json(proc_status_path, proc_status)
 
+def clean(proc_status, proc_status_path, args):
+
+    for ep in proc_status["endpoints"].keys():
+
+        if not ep in proc_status["endpoints"]:
+            continue
+
+        if not "processing" in proc_status["endpoints"][ep]:
+            # processing not started
+            continue
+
+        processing_info = proc_status["endpoints"][ep]["processing"]
+        files_to_remove = list()
+        for subpath in processing_info.keys():
+            full_subpath = os.path.join(DATA_DIR, ep, "event", subpath)
+            for fn in ("drugs.csv.gz", "reactions.csv.gz", "reports.csv.gz", "faers_processor.log", "local_processing_status.json"):
+
+                if os.path.exists(os.path.join(full_subpath, fn)):
+                    files_to_remove.append( os.path.join(full_subpath, fn) )
+
+        response = input(f"This will remove {len(files_to_remove)} files. Are you sure? [y/N] ")
+
+        if response == 'y':
+            print("Removing files...")
+            for fp in files_to_remove:
+                print(f"  {fp}")
+                os.unlink(fp)
+            print("Resetting processing...")
+            del(proc_status["endpoints"][ep]["processing"])
+            save_json(proc_status_path, proc_status)
+
 def main():
 
     parser = argparse.ArgumentParser()
     parser.add_argument('--endpoint', default='all', help='Which endpoints to download For a list of available endpoints see the keys in the results section of the download.json file. Defautl is all endpoints.', type=str, required=False)
     parser.add_argument('--subpath', default=None, help="Used to identify a particular event sub-directory to process. Must be spected with a specific endpoint using the --endpoint flag. Purpose to to enable simple multi-processing.")
+    parser.add_argument('--clean', default=False, help="Remove processing files.", action="store_true")
 
     args = parser.parse_args()
 
@@ -611,6 +661,10 @@ def main():
         save_json(proc_status_path, proc_status)
     else:
         proc_status = load_json(proc_status_path)
+
+    if args.clean:
+        clean(proc_status, proc_status_path, args)
+        return
 
     #####
     # Download the openFDA files
