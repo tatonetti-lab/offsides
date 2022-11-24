@@ -73,7 +73,7 @@ def build_dataset(proc_status, endpoint, start_year, end_year):
         for subpath in processing_info.keys():
             if subpath == 'all_other':
                 continue
-            
+
             for fk in ("reports", "drugs", "reactions"):
                 if not os.path.exists(processing_info[subpath][fk]):
                     raise Exception(f"ERROR: Expected data file at {processing_info[subpath][fk]} does not exist.")
@@ -81,6 +81,13 @@ def build_dataset(proc_status, endpoint, start_year, end_year):
 
     subpaths_to_compile = sorted(subpaths_to_compile)
 
+    if all_subpaths:
+        dataset_prefix = f"{endpoint}_{min(subpaths_to_compile)}-{min(subpaths_to_compile)}"
+    else:
+        dataset_prefix = f"{endpoint}_{start_year}-{end_year}"
+
+    print(f"Data files will be saved to {os.path.join(DATA_DIR, 'datasets', dataset_prefix)}")
+    
     print(f"Data are available and ready to compile into a dataset.")
 
     # First, we load the reports and remove duplicates
@@ -104,10 +111,6 @@ def build_dataset(proc_status, endpoint, start_year, end_year):
     if not os.path.exists(os.path.join(DATA_DIR, 'datasets')):
         os.mkdir(os.path.join(DATA_DIR, 'datasets'))
 
-    if all_subpaths:
-        dataset_prefix = f"{endpoint}_{min(subpaths_to_compile)}-{min(subpaths_to_compile)}"
-    else:
-        dataset_prefix = f"{endpoint}_{start_year}-{end_year}"
     if not os.path.exists(os.path.join(DATA_DIR, 'datasets', dataset_prefix)):
         os.mkdir(os.path.join(DATA_DIR, 'datasets', dataset_prefix))
 
