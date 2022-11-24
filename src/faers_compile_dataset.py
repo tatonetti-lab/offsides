@@ -76,6 +76,8 @@ def build_dataset(proc_status, endpoint, start_year, end_year):
                     raise Exception(f"ERROR: Expected data file at {processing_info[subpath][fk]} does not exist.")
             subpaths_to_compile.append(subpath)
 
+    subpaths_to_compile = sorted(subpaths_to_compile)
+    
     print(f"Data are available and ready to compile into a dataset.")
 
     # First, we load the reports and remove duplicates
