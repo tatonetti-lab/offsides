@@ -35,6 +35,9 @@ def build_dataset(proc_status, endpoint, start_year, end_year):
     encountered.
 
     """
+    all_subpaths = False
+    if start_year is None and end_year is None:
+        all_subpaths = True
 
     event_dir = os.path.join(DATA_DIR, endpoint, "event")
 
@@ -55,15 +58,22 @@ def build_dataset(proc_status, endpoint, start_year, end_year):
     processing_info = proc_status["endpoints"][endpoint]["processing"]
 
     subpaths_to_compile = list()
-    for year in range(start_year, end_year+1):
-        for quarter in ('q1', 'q2', 'q3', 'q4'):
-            subpath = f"{year}{quarter}"
-            if not subpath in processing_info:
-                raise Exception(f"ERROR: Data for {endpoint}/event/{subpath} was not found in processor_status.json. Check faers_processor.py run was completed and try again.")
-            else:
-                for fk in ("reports", "drugs", "reactions"):
-                    if not os.path.exists(processing_info[subpath][fk]):
-                        raise Exception(f"ERROR: Expected data file at {processing_info[subpath][fk]} does not exist.")
+    if not all_subpaths:
+        for year in range(start_year, end_year+1):
+            for quarter in ('q1', 'q2', 'q3', 'q4'):
+                subpath = f"{year}{quarter}"
+                if not subpath in processing_info:
+                    raise Exception(f"ERROR: Data for {endpoint}/event/{subpath} was not found in processor_status.json. Check faers_processor.py run was completed and try again.")
+                else:
+                    for fk in ("reports", "drugs", "reactions"):
+                        if not os.path.exists(processing_info[subpath][fk]):
+                            raise Exception(f"ERROR: Expected data file at {processing_info[subpath][fk]} does not exist.")
+                subpaths_to_compile.append(subpath)
+    else:
+        for subpath in processing_info.keys():
+            for fk in ("reports", "drugs", "reactions"):
+                if not os.path.exists(processing_info[subpath][fk]):
+                    raise Exception(f"ERROR: Expected data file at {processing_info[subpath][fk]} does not exist.")
             subpaths_to_compile.append(subpath)
 
     print(f"Data are available and ready to compile into a dataset.")
@@ -151,19 +161,19 @@ def main():
 
     args = parser.parse_args()
 
-    if args.years is None:
-        start_year = 2004 # the first year FAERS makes data available for
-        end_year = int(datetime.now().strftime('%Y'))
-    elif args.years.find('-') == -1:
-        start_year = end_year = int(args.years)
-    else:
-        start_year, end_year  = map(int, args.years.split('-'))
-
     proc_status_path = os.path.join(DATA_DIR, 'processer_status.json')
     if not os.path.exists(proc_status_path):
         raise Exception(f"ERROR: No processor_status.json file present. Was faers_processor.py run?")
     else:
         proc_status = load_json(proc_status_path)
+
+    if args.years is None:
+        start_year = None
+        end_year = None
+    elif args.years.find('-') == -1:
+        start_year = end_year = int(args.years)
+    else:
+        start_year, end_year  = map(int, args.years.split('-'))
 
     build_dataset(proc_status, args.endpoint, start_year, end_year)
 
