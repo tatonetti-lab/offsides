@@ -24,7 +24,7 @@ from datetime import datetime
 from pathlib import Path
 
 sys.path.append('./src')
-from faers_processor import save_json, load_json, generate_file_md5
+from faers_processor import save_json, load_json, generate_file_md5, save_object, load_object
 
 DATA_DIR = './data/faers'
 
@@ -124,7 +124,7 @@ def build_dataset(proc_status, endpoint, start_year, end_year):
             # - (ingredient:RxCUI, route) x (reaction)
             # - (ingredient:RxCUI, route) by (indication:STRING)
             "ingredients_by_drugs": {"file": "", "md5": ""},
-            "ingredients_by_reports": {"file": "", "md5": ""},
+            "ingredients_by_reactions": {"file": "", "md5": ""},
             "ingredients_by_indications": {"file": "", "md5": ""}
         }
         save_json(dataset_info_path, dataset_info)
@@ -231,11 +231,14 @@ def build_dataset(proc_status, endpoint, start_year, end_year):
     # We will use the CSR sparse matrix format
     # print(drugs_nodup.shape)
     ingredients_by_drugs_path = os.path.join(dataset_path, f"ingredients_by_drugs.npz")
+    ingredients_by_indications_path = os.path.join(dataset_path, f"ingredients_by_indications.npz")
 
-    if os.path.exists(ingredients_by_drugs_path) and generate_file_md5(ingredients_by_drugs_path) == dataset_info["ingredients_by_drugs"]["md5"]:
-        print("Matrix ingrdients by drugs is already built, loading from file...", end="")
+    if os.path.exists(ingredients_by_drugs_path) and generate_file_md5(ingredients_by_drugs_path) == dataset_info["ingredients_by_drugs"]["md5"]\
+        and os.path.exists(ingredients_by_indications_path) and generate_file_md5(ingredients_by_indications_path) == dataset_info["ingredients_by_indications"]["md5"]:
+        print("Matrices for (ingredients by drugs) and (ingredients by indications) are already built, loading from file...", end="")
         ingredients_by_drugs = sp.sparse.load_npz(ingredients_by_drugs_path)
-        print("ok")
+        ingredients_by_indications = sp.sparse.load_npz(ingredients_by_indications_path)
+        print(f"ok. Memory usage is: {process_memory():.2f}GB")
     else:
         print(f"Building ingredients_route by reports matrix. Memory usage is: {process_memory():.2f}GB")
 
@@ -272,13 +275,16 @@ def build_dataset(proc_status, endpoint, start_year, end_year):
                 ingredroute2reports[key] = set()
             ingredroute2reports[key].add(row['safetyreportid'])
 
-        print(f"  Building medicinalproduct|ingredient => safetyreportid map. Memory usage is: {process_memory():.2f}GB")
+        print(f"  Building (medicinalproduct|ingredient => safetyreportid) and (indication => safetyreportid) maps. Memory usage is: {process_memory():.2f}GB")
         drug2reports = dict()
         report2drugs = dict()
+        indication2reports = dict()
+        report2indications = dict()
+
         for _, row in tqdm(drugs_nodup.iterrows(), total=drugs_nodup.shape[0]):
             # if there is no RxCUI or the RxCUI maps to muliple ingredients
             # then we use the medicinalproduct
-            if pd.isna(row['ingredient_rxcui']) or row['ingredient_rxcui'].find(', ') == -1:
+            if pd.isna(row['ingredient_rxcui']) or row['ingredient_rxcui'].find(', ') != -1:
                 drug_key = str(row['medicinalproduct'])
             else:
                 drug_key = str(row['ingredient_rxcui'])
@@ -293,7 +299,23 @@ def build_dataset(proc_status, endpoint, start_year, end_year):
 
             report2drugs[row['safetyreportid']].add(drug_key)
 
-        print(f"  Intersecting maps to build ingredient_by_drugs matrix. Memory usage is: {process_memory():.2f}GB")
+            # indication maps
+            if not pd.isna(row['drugindication']):
+                if not indication2reports.get(row['drugindication']):
+                    indication2reports[row['drugindication']] = set()
+
+                indication2reports[row['drugindication']].add(row['safetyreportid'])
+
+                if not report2indications.get(row['safetyreportid']):
+                    report2indications[row['safetyreportid']] = set()
+
+                report2indications[row['safetyreportid']].add(row['drugindication'])
+
+        #####
+        # Ingredients by drugs
+        ##
+
+        print(f"  Intersecting maps to build ingredients_by_drugs matrix. Memory usage is: {process_memory():.2f}GB")
 
         sorted_ingredroutes = sorted(ingredroute2reports.keys())
         sorted_drugs = sorted(drug2reports.keys())
@@ -324,42 +346,180 @@ def build_dataset(proc_status, endpoint, start_year, end_year):
         print(f"  Saving sparse matrix in npz format...")
         sp.sparse.save_npz(ingredients_by_drugs_path, ingredients_by_drugs)
 
+        #####
+        # Ingredients by Indications
+        ##
+
+        print(f"  Intersection maps to build ingredients_by_indications matrix. Memory usage is: {process_memory():.2f}GB")
+        sorted_indications = sorted(indication2reports.keys())
+        sorted_indications2index = dict(zip(sorted_indications, range(len(sorted_indications))))
+
+        row_ind = list()
+        col_ind = list()
+        data = list()
+
+        for row_idx, ingredroute in tqdm(enumerate(sorted_ingredroutes), total=len(sorted_ingredroutes)):
+
+            for indication in reduce(operator.or_, [report2indications.get(r, set()) for r in ingredroute2reports[ingredroute]]):
+                col_idx = sorted_indications2index[indication]
+                nreports = len(ingredroute2reports[ingredroute] & indication2reports[indication])
+                if nreports == 0:
+                    continue
+
+                row_ind.append(row_idx)
+                col_ind.append(col_idx)
+                data.append(nreports/float(len(ingredroute2reports[ingredroute])))
+
+        nrows = len(sorted_ingredroutes)
+        ncols = len(sorted_indications)
+        print(f"  Loading sparse matrix ({nrows}, {ncols}) with density: {100*len(data)/(nrows*ncols):.2f}%. Memory usage is: {process_memory():.2f}GB")
+        ingredients_by_indications = sp.sparse.csr_matrix((data, (row_ind, col_ind)), shape=(nrows, ncols))
+
+        print(f"  Saving sparse matrix in npz format...")
+        sp.sparse.save_npz(ingredients_by_indications_path, ingredients_by_indications)
+
+        #####
+        # Support files that will be used later
+        ##
+
         print(f"  Saving map files.")
         save_json(os.path.join(dataset_path, "ingredient_routes.json"), {"sorted_ingredroutes": sorted_ingredroutes})
         save_json(os.path.join(dataset_path, "drugs.json"), {"sorted_drugs": sorted_drugs})
+        save_json(os.path.join(dataset_path, "indications.json"), {"sorted_drugs": sorted_indications})
+        save_object(os.path.join(dataset_path, "ingredroute2reports.pkl"), ingredroute2reports)
 
         dataset_info["ingredients_by_drugs"]["md5"] = generate_file_md5(ingredients_by_drugs_path)
         dataset_info["ingredients_by_drugs"]["file"] = ingredients_by_drugs_path
+        dataset_info["ingredients_by_drugs"]["shape"] = f"({len(sorted_ingredroutes)}, {len(sorted_drugs)})"
+        dataset_info["ingredients_by_indications"]["md5"] = generate_file_md5(ingredients_by_indications_path)
+        dataset_info["ingredients_by_indications"]["file"] = ingredients_by_indications_path
+        dataset_info["ingredients_by_indications"]["shape"] = f"({len(sorted_ingredroutes)}, {len(sorted_indications)})"
         save_json(dataset_info_path, dataset_info)
 
+        # memory cleanup
+        del(ingredients_by_drugs)
+        del(sorted_drugs)
+        del(sorted_drugs2index)
+        del(drug2reports)
+        del(report2drugs)
+
+        del(ingredients_by_indications)
+        del(sorted_indications)
+        del(sorted_indications2index)
+        del(indication2reports)
+        del(report2indications)
+
     del(drugs_nodup)
-
-    return
-
 
     ######
     # Reactions
     ######
+    reactions_path = os.path.join(dataset_path, f"reactions.csv.gz")
 
-    print(f"Loading reactions data for non-duplicate reports. Current process memory usage is: {process_memory():.2f}GB")
-    reactions = None
-    for subpath in subpaths_to_compile:
-        if reactions is None:
-            reactions = pd.read_csv(processing_info[subpath]["reactions"], dtype=str)
+    if os.path.exists(reactions_path) and generate_file_md5(reactions_path) == dataset_info["reactions"]["md5"]:
+        print(f"Loading reaction data from existing file... ", end="")
+        reactions_nodup = pd.read_csv(reactions_path, dtype=str)
+        print(f"ok. Memory usage is: {process_memory():.2f}GB")
+    else:
+        print(f"Loading reactions data for non-duplicate reports. Current process memory usage is: {process_memory():.2f}GB")
+        reactions = None
+        for subpath in subpaths_to_compile:
+            if reactions is None:
+                reactions = pd.read_csv(processing_info[subpath]["reactions"], dtype=str)
+            else:
+                reactions = pd.concat([reactions, pd.read_csv(processing_info[subpath]["reactions"], dtype=str)])
+
+            print(f"  Concating {subpath} with resulting dimensions: {reactions.shape}. Memory usage is: {process_memory():.2f}GB")
+
+        reactions_nodup = reactions[reactions['safetyreportid'].isin(nodup_reportids)]
+        nduplicates = reactions.shape[0]-reactions_nodup.shape[0]
+        print(f"Removed {nduplicates} ({100*nduplicates/float(reactions.shape[0]):.2f}%) duplicates. Memory usage is: {process_memory():.2f}GB")
+
+
+        print(f"Writing resulting reactions file ({reactions_nodup.shape}) to path: {reactions_path}")
+        reactions_nodup.to_csv(reactions_path, index=False)
+
+        dataset_info["reactions"]["md5"] = generate_file_md5(reactions_path)
+        dataset_info["reactions"]["file"] = reactions_path
+        save_json(dataset_info_path, dataset_info)
+
+        del(reactions)
+
+    #####
+    # Building reaction maps
+    ##
+
+    if not 'ingredroute2reports' in locals() or not 'sorted_ingredroutes' in locals():
+        if not os.path.exists(os.path.join(dataset_path, "ingredroute2reports.pkl")):
+            raise Exception("ERROR: Required variables 'ingredroute2reports' was not available and not saved to disk. Build is broken.")
         else:
-            reactions = pd.concat([reactions, pd.read_csv(processing_info[subpath]["reactions"], dtype=str)])
+            ingredroute2reports = load_object(os.path.join(dataset_path, "ingredroute2reports.pkl"))
+            sorted_ingredroutes = sorted(ingredroute2reports.keys())
 
-        print(f"  Concating {subpath} with resulting dimensions: {reactions.shape}. Memory usage is: {process_memory():.2f}GB")
+    ingredients_by_reactions_path = os.path.join(dataset_path, "ingredients_by_reactions.npz")
 
-    reactions_nodup = reactions[reactions['safetyreportid'].isin(nodup_reportids)]
-    nduplicates = reactions.shape[0]-reactions_nodup.shape[0]
-    print(f"Removed {nduplicates} ({100*nduplicates/float(reactions.shape[0]):.2f}%) duplicates. Memory usage is: {process_memory():.2f}GB")
+    if os.path.exists(ingredients_by_reactions_path) and generate_file_md5(ingredients_by_reactions_path) == dataset_info["ingredients_by_reactions"]["md5"]:
+        print("Matrix for ingredients_by_reactions is built and validated.")
+    else:
 
-    reactions_path = os.path.join(DATA_DIR, 'datasets', dataset_prefix, f"reactions.csv.gz")
-    print(f"Writing resulting reactions file ({reactions_nodup.shape}) to path: {reactions_path}")
-    reactions_nodup.to_csv(reactions_path, index=False)
+        print(f"  Building (pt_meddra_id => safetyreportid) maps. Memory usage is: {process_memory():.2f}GB")
+        reaction2reports = dict()
+        report2reactions = dict()
 
-    del(reactions)
+        for _, row in tqdm(reactions_nodup.iterrows(), total=reactions_nodup.shape[0]):
+            if int(row['error_code']) == 1:
+                continue
+
+            if not reaction2reports.get(row['pt_meddra_id']):
+                reaction2reports[row['pt_meddra_id']] = set()
+
+            reaction2reports[row['pt_meddra_id']].add(row['safetyreportid'])
+
+            if not report2reactions.get(row['safetyreportid']):
+                report2reactions[row['safetyreportid']] = set()
+
+            report2reactions[row['safetyreportid']].add(row['pt_meddra_id'])
+
+        #####
+        # ingredients by reactions
+        ##
+
+        print(f"  Intersection maps to build ingredient_by_reactions matrix. Memory usage is: {process_memory():.2f}GB")
+        sorted_reactions = sorted(reaction2reports.keys())
+        sorted_reactions2index = dict(zip(sorted_reactions, range(len(sorted_reactions))))
+
+        row_ind = list()
+        col_ind = list()
+        data = list()
+
+        for row_idx, ingredroute in tqdm(enumerate(sorted_ingredroutes), total=len(sorted_ingredroutes)):
+
+            for reaction in reduce(operator.or_, [report2reactions.get(r, set()) for r in ingredroute2reports[ingredroute]]):
+                col_idx = sorted_reactions2index[reaction]
+                nreports = len(ingredroute2reports[ingredroute] & reaction2reports[reaction])
+                if nreports == 0:
+                    continue
+
+                row_ind.append(row_idx)
+                col_ind.append(col_idx)
+                data.append(nreports/float(len(ingredroute2reports[ingredroute])))
+
+        nrows = len(sorted_ingredroutes)
+        ncols = len(sorted_reactions)
+        print(f"  Loading sparse matrix ({nrows}, {ncols}) with density: {100*len(data)/(nrows*ncols):.2f}%. Memory usage is: {process_memory():.2f}GB")
+        ingredients_by_reactions = sp.sparse.csr_matrix((data, (row_ind, col_ind)), shape=(nrows, ncols))
+
+        print(f"  Saving sparse matrix in npz format...")
+        sp.sparse.save_npz(ingredients_by_reactions_path, ingredients_by_reactions)
+
+        print(f"  Saving map file.")
+        save_json(os.path.join(dataset_path, "reactions.json"), {"sorted_reactions": sorted_reactions})
+
+        dataset_info["ingredients_by_reactions"]["md5"] = generate_file_md5(ingredients_by_reactions_path)
+        dataset_info["ingredients_by_reactions"]["file"] = ingredients_by_reactions_path
+        dataset_info["ingredients_by_reactions"]["shape"] = f"({len(sorted_ingredroutes)}, {len(sorted_reactions)})"
+        save_json(dataset_info_path, dataset_info)
+
     del(reactions_nodup)
 
 def main():

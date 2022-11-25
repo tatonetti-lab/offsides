@@ -21,6 +21,7 @@ import gzip
 import json
 import time
 import yaml
+import pickle
 import shutil
 import hashlib
 import zipfile
@@ -54,15 +55,43 @@ def generate_file_md5(filename, blocksize=2**20):
     return m.hexdigest()
 
 def load_json(filename):
-    fh = open(filename)
-    data = json.loads(fh.read())
-    fh.close()
+    if filename.endswith('.gz'):
+        # compressed load
+        fh = gzip.open(filename, 'r')
+        json_str = fh.read().decode('utf-8')
+        data = json.loads(json_str)
+        fh.close()
+    else:
+        # uncompressed load
+        fh = open(filename)
+        data = json.loads(fh.read())
+        fh.close()
+
     return data
 
 def save_json(filename, data):
-    fh = open(filename, 'w')
-    fh.write(json.dumps(data, indent=4))
+    if filename.endswith('.gz'):
+        # compressed save
+        fh = gzip.open(filename, 'w')
+        json_bytes = json.dumps(data).encode('utf-8')
+        fh.write(json_bytes)
+        fh.close()
+    else:
+        # uncompressed save
+        fh = open(filename, 'w')
+        fh.write(json.dumps(data, indent=4))
+        fh.close()
+
+def save_object(filename, data):
+    fh = open(filename, 'wb')
+    pickle.dump(data, fh)
     fh.close()
+
+def load_object(filename):
+    fh = open(filename, 'rb')
+    data = pickle.load(fh)
+    fh.close()
+    return data
 
 def download_file(url, local_path):
     # make an HTTP request within a context manager
@@ -396,7 +425,8 @@ def process(proc_status, proc_status_path, args, single_ep = 'all', single_subpa
                         for report in tqdm(data["results"]):
                             report_key_items = list()
 
-                            save_json('./data/drug-event-report.json', report)
+                            # for debugging
+                            # save_json('./data/drug-event-report.json', report)
 
                             # extract report level data
                             report_data = list()
@@ -521,7 +551,7 @@ def process(proc_status, proc_status_path, args, single_ep = 'all', single_subpa
                             # normalize reaction data
                             error_code = 0
                             for row in reactions_data:
-
+                                pt_meddra_id = None
                                 if row['reactionmeddrapt'] is not None and row['reactionmeddrapt'].lower() in term2pt:
                                     pt_meddra_id = term2pt[row['reactionmeddrapt'].lower()]
                                 else:
