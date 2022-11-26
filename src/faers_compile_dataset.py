@@ -117,15 +117,32 @@ def build_dataset(proc_status, endpoint, start_year, end_year):
             "reports": {"file": "", "md5": ""},
             "drugs": {"file": "", "md5": ""},
             "reactions": {"file": "", "md5": ""},
-            # list of non-duplicate report ids
-            "nonduplicate_reportids": {"file": "", "md5": ""},
+            # non-duplicate report ids and their position in the matrices
+            "report2index": {"file": "", "md5": ""},
             # sparse matrices for
+            # reports x (ingredient:RxCUI OR medicinalproduct:STRING)
+            # reports x (ingredient:RxCUI, route)
+            # reports x indications
+            # reports by reactions
+            "reports_by_drugs": {"file": "", "md5": ""},
+            "reports_by_ingredients": {"file": "", "md5": ""},
+            "reports_by_indications": {"file": "", "md5": ""},
+            "reports_by_reactions": {"file": "", "md5": ""}
+
+            # NOTE:
+            # 11/25 - these are all derivative tables that will depend on
+            #         the results of the propensity score matching. After
+            #         completing them, I realized that they are not actually
+            #         what we are after. Leaving the code in, but commented out
+            #         because we might want use it later.
+            #
             # - (ingredient:RxCUI, route) x (ingredient:RxCUI OR medicinalproduct:STRING)
             # - (ingredient:RxCUI, route) x (reaction)
             # - (ingredient:RxCUI, route) by (indication:STRING)
-            "ingredients_by_drugs": {"file": "", "md5": ""},
-            "ingredients_by_reactions": {"file": "", "md5": ""},
-            "ingredients_by_indications": {"file": "", "md5": ""}
+            # "ingredients_by_drugs": {"file": "", "md5": ""},
+            # "ingredients_by_reactions": {"file": "", "md5": ""},
+            # "ingredients_by_indications": {"file": "", "md5": ""}
+
         }
         save_json(dataset_info_path, dataset_info)
     else:
@@ -136,21 +153,23 @@ def build_dataset(proc_status, endpoint, start_year, end_year):
     # - collect from subpaths and remove duplicates
     #######
     reports_path = os.path.join(dataset_path, f"reports.csv.gz")
-    nonduplicates_path = os.path.join(dataset_path, f"nonduplicate_reportids.json")
-    nodup_reportids = None
+    report2index_path = os.path.join(dataset_path, f"report2index.json")
+    report2index = None
+    reports = None
 
     if os.path.exists(reports_path) and generate_file_md5(reports_path) == dataset_info["reports"]["md5"]:
         # already complete
         # if nonduplicate_reportids is also available then we do no tneed to load reports into memory
         print(f"Reports file is already generated. Will check if non-duplicate report ids are avaialble.")
-        if os.path.exists(nonduplicates_path) and generate_file_md5(nonduplicates_path) == dataset_info["nonduplicate_reportids"]["md5"]:
+        if os.path.exists(report2index_path) and generate_file_md5(report2index_path) == dataset_info["report2index"]["md5"]:
             print(f"Duplicates have already been identified. Loading from file.")
-            nodup_reportids = load_json(nonduplicates_path)["reportids"]
+            report2index = load_json(report2index_path)
+            nodup_reportids = report2index.keys()
         else:
             nodups = pd.read_csv(reports_path, dtype=str)
     else:
         print(f"Beginning by loading reports. Current process memory usage is: {process_memory():.2f}GB")
-        reports = None
+
         for subpath in subpaths_to_compile:
             if reports is None:
                 reports = pd.read_csv(processing_info[subpath]["reports"], dtype=str)
@@ -171,29 +190,31 @@ def build_dataset(proc_status, endpoint, start_year, end_year):
         dataset_info["reports"]["file"] = reports_path
         save_json(dataset_info_path, dataset_info)
 
-    if nodup_reportids is None:
+    if report2index is None:
 
         # we only need the reportids to include, the reports dataframes can be released
-        nodup_reportids = list(set(nodups['safetyreportid']))
-        save_json(nonduplicates_path, {"reportids": nodup_reportids})
+        nodup_reportids = sorted(set(nodups['safetyreportid']))
+        report2index = dict(zip(nodup_reportids, range(len(nodup_reportids))))
 
-        dataset_info["nonduplicate_reportids"]["md5"] = generate_file_md5(nonduplicates_path)
-        dataset_info["nonduplicate_reportids"]["file"] = nonduplicates_path
+        save_json(report2index_path, report2index)
+
+        dataset_info["report2index"]["md5"] = generate_file_md5(report2index_path)
+        dataset_info["report2index"]["file"] = report2index_path
         save_json(dataset_info_path, dataset_info)
 
         # clean up memory
-        del(reports)
+        if not reports is None:
+            del(reports)
         del(nodups)
 
     ######
     # Drugs
     # - concatenate drug data from subpaths
     # - build sparse matrices for:
-    #   - ingredient, route x report
-    #   - report x ingredient OR medicinalproduct (ingredient if available)
-    #   - (ingredient, route) x (ingredient OR medicinalproduct)
+    #   - report x drug (ingredient_rxcui OR medicinalproduct if ingredient_rxcui not available)
+    #   - report x (ingredient, route)
     # For simplicity, (ingredient, route) will be referred to as "ingredient"
-    # and (ingredient OR medicinalproduct) will be referred to as "drug"
+    # and (ingredient OR medicinalprodduct) will be referred to as "drug"
     ######
 
     drugs_path = os.path.join(dataset_path, f"drugs.csv.gz")
@@ -227,189 +248,134 @@ def build_dataset(proc_status, endpoint, start_year, end_year):
 
         del(drugs)
 
-    # Build ingredient by report sparse matrix
-    # We will use the CSR sparse matrix format
-    # print(drugs_nodup.shape)
-    ingredients_by_drugs_path = os.path.join(dataset_path, f"ingredients_by_drugs.npz")
-    ingredients_by_indications_path = os.path.join(dataset_path, f"ingredients_by_indications.npz")
 
-    if os.path.exists(ingredients_by_drugs_path) and generate_file_md5(ingredients_by_drugs_path) == dataset_info["ingredients_by_drugs"]["md5"]\
-        and os.path.exists(ingredients_by_indications_path) and generate_file_md5(ingredients_by_indications_path) == dataset_info["ingredients_by_indications"]["md5"]:
-        print("Matrices for (ingredients by drugs) and (ingredients by indications) are already built, loading from file...", end="")
-        ingredients_by_drugs = sp.sparse.load_npz(ingredients_by_drugs_path)
-        ingredients_by_indications = sp.sparse.load_npz(ingredients_by_indications_path)
+    #####
+    # reports by ingredients (ingredient_rxcui, route)
+    # reports by drugs (ingredient_rxuci if available else medicinalproduct)
+    # reports by indications
+    reports_by_ingredients_path = os.path.join(dataset_path, f"reports_by_ingredients.npz")
+    reports_by_drugs_path = os.path.join(dataset_path, f"reports_by_drugs.npz")
+    reports_by_indications_path = os.path.join(dataset_path, f"reports_by_indications.npz")
+
+    if os.path.exists(reports_by_ingredients_path) and generate_file_md5(reports_by_ingredients_path) == dataset_info["reports_by_ingredients"]["md5"]\
+        and os.path.exists(reports_by_drugs_path) and generate_file_md5(reports_by_drugs_path) == dataset_info["reports_by_drugs"]["md5"]\
+        and os.path.exists(reports_by_indications_path) and generate_file_md5(reports_by_indications_path) == dataset_info["reports_by_indications"]["md5"]:
+        print("Matrices for (reports by ingredients), (reports by drugs) and (reports by indications) are already built. ", end="")
+        # reports_by_ingredients = sp.sparse.load_npz(reports_by_ingredients_path)
+        # reports_by_drugs = sp.sparse.load_npz(reports_by_drugs_path)
+        # reports_by_indications = sp.sparse.load_npz(reports_by_indications_path)
         print(f"ok. Memory usage is: {process_memory():.2f}GB")
     else:
-        print(f"Building ingredients_route by reports matrix. Memory usage is: {process_memory():.2f}GB")
+        print(f"Building reports x ingredients, x drugs, and x indications matrices. Memory usage is: {process_memory():.2f}GB")
 
-        # if not adminstration route is provided, we assume oral
+        # if no adminstration route is provided, we assume oral
         drugs_nodup['drugadministrationroute'] = drugs_nodup['drugadministrationroute'].fillna('048')
 
-        # We only use ingredients that can be mapped to RxCUIs
-        # NOTE: This may result in a loss of up 34% of the rows in a test of 2010 data
-        # TODO: Figure out how to recover these rows and what the impact of the
-        # TODO: loss of rows might mean. If it's random then it shouldn't have an
-        # TODO: impact. But if it's not random (more likely) then it can bias the results.
+        ingredient2index = dict()
+        drug2index = dict()
+        indication2index = dict()
 
-        print(f"  Dropping rows that are not mapped to RxCUI ingredients. Memory usage is: {process_memory():.2f}GB")
-        ingredients = drugs_nodup[~drugs_nodup['ingredient_rxcui'].isna()]
+        ingredient_indices = list()
+        drug_indices = list()
+        indication_indices = list()
 
-        # drop rows where the drug mapped to multiple RxCUI ingredients
-        # this results in about a 3.4% loss of rows in a test of 2010 data.
-        # print(ingredients.shape)
-
-        print(f"  Dropping rows that map to multiple RxCUI ingredients. Memory usage is: {process_memory():.2f}GB")
-        ingredients = ingredients[~ingredients['ingredient_rxcui'].str.contains(', ')]
-        # print(ingredients.shape)
-
-        print(f"  Creating a combined ingredient_route column. Memory usage is: {process_memory():.2f}GB")
-        ingredients['ingredient_route'] = ingredients[['ingredient_rxcui', 'drugadministrationroute']].apply(
-            lambda row: '_'.join(row.values.astype(str)), axis=1
-        )
-
-        print(f"  Building ingredient_route => safetyreportid map. Memory usage is: {process_memory():.2f}GB")
-        ingredroute2reports = dict()
-        for _, row in tqdm(ingredients.iterrows(), total=ingredients.shape[0]):
-            key = str(row['ingredient_route'])
-            if not ingredroute2reports.get(key):
-                ingredroute2reports[key] = set()
-            ingredroute2reports[key].add(row['safetyreportid'])
-
-        print(f"  Building (medicinalproduct|ingredient => safetyreportid) and (indication => safetyreportid) maps. Memory usage is: {process_memory():.2f}GB")
-        drug2reports = dict()
-        report2drugs = dict()
-        indication2reports = dict()
-        report2indications = dict()
+        print(f"  Compiling information to build matrices. Memory usage is: {process_memory():.2f}GB")
 
         for _, row in tqdm(drugs_nodup.iterrows(), total=drugs_nodup.shape[0]):
-            # if there is no RxCUI or the RxCUI maps to muliple ingredients
-            # then we use the medicinalproduct
-            if pd.isna(row['ingredient_rxcui']) or row['ingredient_rxcui'].find(', ') != -1:
-                drug_key = str(row['medicinalproduct'])
-            else:
-                drug_key = str(row['ingredient_rxcui'])
 
-            if not drug2reports.get(drug_key):
-                drug2reports[drug_key] = set()
+            if not report2index.get(row['safetyreportid']):
+                # duplicate id that we are not using
+                continue
 
-            drug2reports[drug_key].add(row['safetyreportid'])
+            # this will be the row for all three matrices
+            row_idx = report2index[row['safetyreportid']]
 
-            if not report2drugs.get(row['safetyreportid']):
-                report2drugs[row['safetyreportid']] = set()
+            # ingredients
+            if not pd.isna(row['ingredient_rxcui']):
+                ingredient = f"{row['ingredient_rxcui']}_{row['drugadministrationroute']}"
+                if not ingredient2index.get(ingredient):
+                    ingredient2index[ingredient] = len(ingredient2index)
 
-            report2drugs[row['safetyreportid']].add(drug_key)
+                col_idx = ingredient2index[ingredient]
 
-            # indication maps
+                ingredient_indices.append( (row_idx, col_idx) )
+
+            # drugs
+            if not pd.isna(row['ingredient_rxcui']) or not pd.isna(row['medicinalproduct']):
+                drug = row['ingredient_rxcui'] if not pd.isna(row['ingredient_rxcui']) else row['medicinalproduct']
+                if not drug2index.get(drug):
+                    drug2index[drug] = len(drug2index)
+
+                col_idx = drug2index[drug]
+
+                drug_indices.append( (row_idx, col_idx) )
+
+            # indications
             if not pd.isna(row['drugindication']):
-                if not indication2reports.get(row['drugindication']):
-                    indication2reports[row['drugindication']] = set()
+                if not indication2index.get(row['drugindication']):
+                    indication2index[row['drugindication']] = len(indication2index)
 
-                indication2reports[row['drugindication']].add(row['safetyreportid'])
+                col_idx = indication2index[row['drugindication']]
 
-                if not report2indications.get(row['safetyreportid']):
-                    report2indications[row['safetyreportid']] = set()
+                indication_indices.append( (row_idx, col_idx) )
 
-                report2indications[row['safetyreportid']].add(row['drugindication'])
+        print(f"  Building reports x ingredients matrix. Memory usage is: {process_memory():.2f}GB")
+        row_ind, col_ind = zip(*ingredient_indices)
+        data = np.repeat(1, len(row_ind))
+        nrows = len(report2index)
+        ncols = len(ingredient2index)
+        reports_by_ingredients = sp.sparse.csr_matrix((data, (row_ind, col_ind)), shape=(nrows, ncols))
 
-        #####
-        # Ingredients by drugs
-        ##
-
-        print(f"  Intersecting maps to build ingredients_by_drugs matrix. Memory usage is: {process_memory():.2f}GB")
-
-        sorted_ingredroutes = sorted(ingredroute2reports.keys())
-        sorted_drugs = sorted(drug2reports.keys())
-        sorted_drugs2index = dict(zip(sorted_drugs, range(len(sorted_drugs))))
-
-        row_ind = list()
-        col_ind = list()
-        data = list()
-
-        for row_idx, ingredroute in tqdm(enumerate(sorted_ingredroutes), total=len(sorted_ingredroutes)):
-
-            for drug in reduce(operator.or_, [report2drugs[r] for r in ingredroute2reports[ingredroute]]):
-            #for col_idx, drug in enumerate(sorted_drugs):
-                col_idx = sorted_drugs2index[drug]
-                nreports = len(ingredroute2reports[ingredroute] & drug2reports[drug])
-                if nreports == 0:
-                    continue
-
-                row_ind.append(row_idx)
-                col_ind.append(col_idx)
-                data.append(nreports/float(len(ingredroute2reports[ingredroute])))
-
-        nrows = len(sorted_ingredroutes)
-        ncols = len(sorted_drugs)
-        print(f"  Loading sparse matrix ({nrows}, {ncols}) with density: {100*len(data)/(nrows*ncols):.2f}%. Memory usage is: {process_memory():.2f}GB")
-        ingredients_by_drugs = sp.sparse.csr_matrix((data, (row_ind, col_ind)), shape=(nrows, ncols))
-
-        print(f"  Saving sparse matrix in npz format...")
-        sp.sparse.save_npz(ingredients_by_drugs_path, ingredients_by_drugs)
-
-        #####
-        # Ingredients by Indications
-        ##
-
-        print(f"  Intersection maps to build ingredients_by_indications matrix. Memory usage is: {process_memory():.2f}GB")
-        sorted_indications = sorted(indication2reports.keys())
-        sorted_indications2index = dict(zip(sorted_indications, range(len(sorted_indications))))
-
-        row_ind = list()
-        col_ind = list()
-        data = list()
-
-        for row_idx, ingredroute in tqdm(enumerate(sorted_ingredroutes), total=len(sorted_ingredroutes)):
-
-            for indication in reduce(operator.or_, [report2indications.get(r, set()) for r in ingredroute2reports[ingredroute]]):
-                col_idx = sorted_indications2index[indication]
-                nreports = len(ingredroute2reports[ingredroute] & indication2reports[indication])
-                if nreports == 0:
-                    continue
-
-                row_ind.append(row_idx)
-                col_ind.append(col_idx)
-                data.append(nreports/float(len(ingredroute2reports[ingredroute])))
-
-        nrows = len(sorted_ingredroutes)
-        ncols = len(sorted_indications)
-        print(f"  Loading sparse matrix ({nrows}, {ncols}) with density: {100*len(data)/(nrows*ncols):.2f}%. Memory usage is: {process_memory():.2f}GB")
-        ingredients_by_indications = sp.sparse.csr_matrix((data, (row_ind, col_ind)), shape=(nrows, ncols))
-
-        print(f"  Saving sparse matrix in npz format...")
-        sp.sparse.save_npz(ingredients_by_indications_path, ingredients_by_indications)
-
-        #####
-        # Support files that will be used later
-        ##
-
-        print(f"  Saving map files.")
-        save_json(os.path.join(dataset_path, "ingredient_routes.json"), {"sorted_ingredroutes": sorted_ingredroutes})
-        save_json(os.path.join(dataset_path, "drugs.json"), {"sorted_drugs": sorted_drugs})
-        save_json(os.path.join(dataset_path, "indications.json"), {"sorted_drugs": sorted_indications})
-        save_object(os.path.join(dataset_path, "ingredroute2reports.pkl"), ingredroute2reports)
-
-        dataset_info["ingredients_by_drugs"]["md5"] = generate_file_md5(ingredients_by_drugs_path)
-        dataset_info["ingredients_by_drugs"]["file"] = ingredients_by_drugs_path
-        dataset_info["ingredients_by_drugs"]["shape"] = f"({len(sorted_ingredroutes)}, {len(sorted_drugs)})"
-        dataset_info["ingredients_by_indications"]["md5"] = generate_file_md5(ingredients_by_indications_path)
-        dataset_info["ingredients_by_indications"]["file"] = ingredients_by_indications_path
-        dataset_info["ingredients_by_indications"]["shape"] = f"({len(sorted_ingredroutes)}, {len(sorted_indications)})"
+        sp.sparse.save_npz(reports_by_ingredients_path, reports_by_ingredients)
+        dataset_info["reports_by_ingredients"]["md5"] = generate_file_md5(reports_by_ingredients_path)
+        dataset_info["reports_by_ingredients"]["file"] = reports_by_ingredients_path
+        dataset_info["reports_by_ingredients"]["shape"] = (nrows, ncols)
+        dataset_info["reports_by_ingredients"]["density"] = 100*len(row_ind)/float(nrows*ncols)
         save_json(dataset_info_path, dataset_info)
+        save_json(os.path.join(dataset_path, "ingredient2index.json"), ingredient2index)
 
-        # memory cleanup
-        del(ingredients_by_drugs)
-        del(sorted_drugs)
-        del(sorted_drugs2index)
-        del(drug2reports)
-        del(report2drugs)
+        del(reports_by_ingredients)
+        del(ingredient_indices)
+        del(ingredient2index)
+        print(f"    Saved matrix to {reports_by_ingredients_path} with shape: ({nrows, ncols}) and density: {100*len(row_ind)/float(nrows*ncols):.2f}%. Memory usage is: {process_memory():.2f}GB")
 
-        del(ingredients_by_indications)
-        del(sorted_indications)
-        del(sorted_indications2index)
-        del(indication2reports)
-        del(report2indications)
+        print(f"  Building reports x drugs matrix. Memory usage is: {process_memory():.2f}GB")
+        row_ind, col_ind = zip(*drug_indices)
+        data = np.repeat(1, len(row_ind))
+        ncols = len(drug2index)
+        reports_by_drugs = sp.sparse.csr_matrix((data, (row_ind, col_ind)), shape=(nrows, ncols))
 
-    del(drugs_nodup)
+        sp.sparse.save_npz(reports_by_drugs_path, reports_by_drugs)
+        dataset_info["reports_by_drugs"]["md5"] = generate_file_md5(reports_by_drugs_path)
+        dataset_info["reports_by_drugs"]["file"] = reports_by_drugs_path
+        dataset_info["reports_by_drugs"]["shape"] = (nrows, ncols)
+        dataset_info["reports_by_drugs"]["density"] = 100*len(row_ind)/float(nrows*ncols)
+        save_json(dataset_info_path, dataset_info)
+        save_json(os.path.join(dataset_path, "drug2index.json"), drug2index)
+
+        del(reports_by_drugs)
+        del(drug_indices)
+        del(drug2index)
+        print(f"    Saved matrix to {reports_by_drugs_path} with shape: ({nrows, ncols}) and density: {100*len(row_ind)/float(nrows*ncols):.2f}%. Memory usage is: {process_memory():.2f}GB")
+
+        print(f"  Building reports x indication matrix. Memory usage is: {process_memory():.2f}GB")
+        row_ind, col_ind = zip(*indication_indices)
+        data = np.repeat(1, len(row_ind))
+        ncols = len(indication2index)
+        reports_by_indications = sp.sparse.csr_matrix((data, (row_ind, col_ind)), shape=(nrows, ncols))
+
+        sp.sparse.save_npz(reports_by_indications_path, reports_by_indications)
+        dataset_info["reports_by_indications"]["md5"] = generate_file_md5(reports_by_indications_path)
+        dataset_info["reports_by_indications"]["file"] = reports_by_indications_path
+        dataset_info["reports_by_indications"]["shape"] = (nrows, ncols)
+        dataset_info["reports_by_indications"]["density"] = 100*len(row_ind)/float(nrows*ncols)
+        save_json(dataset_info_path, dataset_info)
+        save_json(os.path.join(dataset_path, "indication2index.json"), indication2index)
+
+        del(reports_by_indications)
+        del(indication_indices)
+        del(indication2index)
+        print(f"    Saved matrix to {reports_by_indications_path} with shape: ({nrows, ncols}) and density: {100*len(row_ind)/float(nrows*ncols):.2f}%. Memory usage is: {process_memory():.2f}GB")
 
     ######
     # Reactions
@@ -446,81 +412,60 @@ def build_dataset(proc_status, endpoint, start_year, end_year):
         del(reactions)
 
     #####
-    # Building reaction maps
-    ##
+    # reports by reactions
 
-    if not 'ingredroute2reports' in locals() or not 'sorted_ingredroutes' in locals():
-        if not os.path.exists(os.path.join(dataset_path, "ingredroute2reports.pkl")):
-            raise Exception("ERROR: Required variables 'ingredroute2reports' was not available and not saved to disk. Build is broken.")
-        else:
-            ingredroute2reports = load_object(os.path.join(dataset_path, "ingredroute2reports.pkl"))
-            sorted_ingredroutes = sorted(ingredroute2reports.keys())
+    reports_by_reactions_path = os.path.join(dataset_path, f"reports_by_reactions.npz")
 
-    ingredients_by_reactions_path = os.path.join(dataset_path, "ingredients_by_reactions.npz")
-
-    if os.path.exists(ingredients_by_reactions_path) and generate_file_md5(ingredients_by_reactions_path) == dataset_info["ingredients_by_reactions"]["md5"]:
-        print("Matrix for ingredients_by_reactions is built and validated.")
+    if os.path.exists(reports_by_reactions_path) and generate_file_md5(reports_by_reactions_path) == dataset_info["reports_by_reactions"]["md5"]:
+        print("Matrix for (reports by reactions) is already built. ", end="")
+        # reports_by_reactions = sp.sparse.load_npz(reports_by_reactions_path)
+        print(f"ok. Memory usage is: {process_memory():.2f}GB")
     else:
+        reaction2index = dict()
+        reaction_indices = list()
 
-        print(f"  Building (pt_meddra_id => safetyreportid) maps. Memory usage is: {process_memory():.2f}GB")
-        reaction2reports = dict()
-        report2reactions = dict()
+        print(f"  Compiling information to build (report by reaction) matrix. Memory usage is: {process_memory():.2f}GB")
 
         for _, row in tqdm(reactions_nodup.iterrows(), total=reactions_nodup.shape[0]):
-            if int(row['error_code']) == 1:
+
+            if not report2index.get(row['safetyreportid']):
+                # duplicate id that we are not using
                 continue
 
-            if not reaction2reports.get(row['pt_meddra_id']):
-                reaction2reports[row['pt_meddra_id']] = set()
+            if int(row['error_code']) == 1:
+                # error matching the meddra term to an ID
+                continue
 
-            reaction2reports[row['pt_meddra_id']].add(row['safetyreportid'])
+            row_idx = report2index[row['safetyreportid']]
 
-            if not report2reactions.get(row['safetyreportid']):
-                report2reactions[row['safetyreportid']] = set()
+            if not reaction2index.get(row['pt_meddra_id']):
+                reaction2index[row['pt_meddra_id']] = len(reaction2index)
 
-            report2reactions[row['safetyreportid']].add(row['pt_meddra_id'])
+            col_idx = reaction2index[row['pt_meddra_id']]
 
-        #####
-        # ingredients by reactions
-        ##
+            reaction_indices.append( (row_idx, col_idx) )
 
-        print(f"  Intersection maps to build ingredient_by_reactions matrix. Memory usage is: {process_memory():.2f}GB")
-        sorted_reactions = sorted(reaction2reports.keys())
-        sorted_reactions2index = dict(zip(sorted_reactions, range(len(sorted_reactions))))
+        print(f"  Building reports x reactions matrix. Memory usage is: {process_memory():.2f}GB")
+        row_ind, col_ind = zip(*reaction_indices)
+        data = np.repeat(1, len(row_ind))
+        nrows = len(report2index)
+        ncols = len(reaction2index)
+        reports_by_reactions = sp.sparse.csr_matrix((data, (row_ind, col_ind)), shape=(nrows, ncols))
 
-        row_ind = list()
-        col_ind = list()
-        data = list()
-
-        for row_idx, ingredroute in tqdm(enumerate(sorted_ingredroutes), total=len(sorted_ingredroutes)):
-
-            for reaction in reduce(operator.or_, [report2reactions.get(r, set()) for r in ingredroute2reports[ingredroute]]):
-                col_idx = sorted_reactions2index[reaction]
-                nreports = len(ingredroute2reports[ingredroute] & reaction2reports[reaction])
-                if nreports == 0:
-                    continue
-
-                row_ind.append(row_idx)
-                col_ind.append(col_idx)
-                data.append(nreports/float(len(ingredroute2reports[ingredroute])))
-
-        nrows = len(sorted_ingredroutes)
-        ncols = len(sorted_reactions)
-        print(f"  Loading sparse matrix ({nrows}, {ncols}) with density: {100*len(data)/(nrows*ncols):.2f}%. Memory usage is: {process_memory():.2f}GB")
-        ingredients_by_reactions = sp.sparse.csr_matrix((data, (row_ind, col_ind)), shape=(nrows, ncols))
-
-        print(f"  Saving sparse matrix in npz format...")
-        sp.sparse.save_npz(ingredients_by_reactions_path, ingredients_by_reactions)
-
-        print(f"  Saving map file.")
-        save_json(os.path.join(dataset_path, "reactions.json"), {"sorted_reactions": sorted_reactions})
-
-        dataset_info["ingredients_by_reactions"]["md5"] = generate_file_md5(ingredients_by_reactions_path)
-        dataset_info["ingredients_by_reactions"]["file"] = ingredients_by_reactions_path
-        dataset_info["ingredients_by_reactions"]["shape"] = f"({len(sorted_ingredroutes)}, {len(sorted_reactions)})"
+        sp.sparse.save_npz(reports_by_reactions_path, reports_by_reactions)
+        dataset_info["reports_by_reactions"]["md5"] = generate_file_md5(reports_by_reactions_path)
+        dataset_info["reports_by_reactions"]["file"] = reports_by_reactions_path
+        dataset_info["reports_by_reactions"]["shape"] = (nrows, ncols)
+        dataset_info["reports_by_reactions"]["density"] = 100*len(row_ind)/float(nrows*ncols)
         save_json(dataset_info_path, dataset_info)
+        save_json(os.path.join(dataset_path, "reaction2index.json"), reaction2index)
 
-    del(reactions_nodup)
+        del(reports_by_reactions)
+        del(reaction_indices)
+        del(reaction2index)
+        print(f"    Saved matrix to {reports_by_reactions_path} with shape: ({nrows, ncols}) and density: {100*len(row_ind)/float(nrows*ncols):.2f}%. Memory usage is: {process_memory():.2f}GB")
+
+    return
 
 def main():
     parser = argparse.ArgumentParser()
