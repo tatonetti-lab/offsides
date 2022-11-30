@@ -127,7 +127,13 @@ def build_dataset(proc_status, endpoint, start_year, end_year):
             "reports_by_drugs": {"file": "", "md5": ""},
             "reports_by_ingredients": {"file": "", "md5": ""},
             "reports_by_indications": {"file": "", "md5": ""},
-            "reports_by_reactions": {"file": "", "md5": ""}
+            "reports_by_reactions": {"file": "", "md5": ""},
+            # map files
+            "ingredient2index": {"file": "", "md5": ""},
+            "reaction2index": {"file": "", "md5": ""},
+            "drug2index": {"file": "", "md5": ""},
+            "indication2index": {"file": "", "md5": ""}
+
 
             # NOTE:
             # 11/25 - these are all derivative tables that will depend on
@@ -183,23 +189,33 @@ def build_dataset(proc_status, endpoint, start_year, end_year):
         nduplicates = reports.shape[0]-nodups.shape[0]
         print(f"Removed {nduplicates} ({100*nduplicates/float(reports.shape[0]):.2f}%) duplicates. Memory usage is: {process_memory():.2f}GB")
 
+        print(f"Removing outliers from age and weight columns.")
+        nodups = nodups.astype({'patientonsetage': 'float64', 'patientweight': 'float64'})
+        #print(nodups.dtypes)
+        perc99 = np.percentile(nodups['patientonsetage'].dropna(), 99)
+        nodups.iloc[np.where(nodups['patientonsetage'] >= perc99)[0],nodups.columns.get_loc('patientonsetage')] = np.nan
+
+        perc99 = np.percentile(nodups['patientweight'].dropna(), 99)
+        nodups.iloc[np.where(nodups['patientweight'] >= perc99)[0],nodups.columns.get_loc('patientweight')] = np.nan
+
         print(f"Writing resulting reports file ({nodups.shape}) to path: {reports_path}")
         nodups.to_csv(reports_path, index=False)
 
         dataset_info["reports"]["md5"] = generate_file_md5(reports_path)
-        dataset_info["reports"]["file"] = reports_path
+        dataset_info["reports"]["file"] = os.path.basename(reports_path)
         save_json(dataset_info_path, dataset_info)
 
     if report2index is None:
 
         # we only need the reportids to include, the reports dataframes can be released
         nodup_reportids = sorted(set(nodups['safetyreportid']))
+        print(f"Building an index for reports. Sorted {len(nodup_reportids)} non-duplicate report ids.")
         report2index = dict(zip(nodup_reportids, range(len(nodup_reportids))))
 
         save_json(report2index_path, report2index)
 
         dataset_info["report2index"]["md5"] = generate_file_md5(report2index_path)
-        dataset_info["report2index"]["file"] = report2index_path
+        dataset_info["report2index"]["file"] = os.path.basename(report2index_path)
         save_json(dataset_info_path, dataset_info)
 
         # clean up memory
@@ -243,7 +259,7 @@ def build_dataset(proc_status, endpoint, start_year, end_year):
         drugs_nodup.to_csv(drugs_path, index=False)
 
         dataset_info["drugs"]["md5"] = generate_file_md5(drugs_path)
-        dataset_info["drugs"]["file"] = drugs_path
+        dataset_info["drugs"]["file"] = os.path.basename(drugs_path)
         save_json(dataset_info_path, dataset_info)
 
         del(drugs)
@@ -275,9 +291,9 @@ def build_dataset(proc_status, endpoint, start_year, end_year):
         drug2index = dict()
         indication2index = dict()
 
-        ingredient_indices = list()
-        drug_indices = list()
-        indication_indices = list()
+        ingredient_indices = set()
+        drug_indices = set()
+        indication_indices = set()
 
         print(f"  Compiling information to build matrices. Memory usage is: {process_memory():.2f}GB")
 
@@ -293,31 +309,25 @@ def build_dataset(proc_status, endpoint, start_year, end_year):
             # ingredients
             if not pd.isna(row['ingredient_rxcui']):
                 ingredient = f"{row['ingredient_rxcui']}_{row['drugadministrationroute']}"
-                if not ingredient2index.get(ingredient):
+                if ingredient2index.get(ingredient, -1) == -1:
                     ingredient2index[ingredient] = len(ingredient2index)
 
-                col_idx = ingredient2index[ingredient]
-
-                ingredient_indices.append( (row_idx, col_idx) )
+                ingredient_indices.add( (row_idx, ingredient2index[ingredient]) )
 
             # drugs
             if not pd.isna(row['ingredient_rxcui']) or not pd.isna(row['medicinalproduct']):
                 drug = row['ingredient_rxcui'] if not pd.isna(row['ingredient_rxcui']) else row['medicinalproduct']
-                if not drug2index.get(drug):
+                if drug2index.get(drug, -1) == -1:
                     drug2index[drug] = len(drug2index)
 
-                col_idx = drug2index[drug]
-
-                drug_indices.append( (row_idx, col_idx) )
+                drug_indices.add( (row_idx, drug2index[drug]) )
 
             # indications
             if not pd.isna(row['drugindication']):
-                if not indication2index.get(row['drugindication']):
+                if indication2index.get(row['drugindication'], -1) == -1:
                     indication2index[row['drugindication']] = len(indication2index)
 
-                col_idx = indication2index[row['drugindication']]
-
-                indication_indices.append( (row_idx, col_idx) )
+                indication_indices.add( (row_idx, indication2index[row['drugindication']]) )
 
         print(f"  Building reports x ingredients matrix. Memory usage is: {process_memory():.2f}GB")
         row_ind, col_ind = zip(*ingredient_indices)
@@ -328,11 +338,16 @@ def build_dataset(proc_status, endpoint, start_year, end_year):
 
         sp.sparse.save_npz(reports_by_ingredients_path, reports_by_ingredients)
         dataset_info["reports_by_ingredients"]["md5"] = generate_file_md5(reports_by_ingredients_path)
-        dataset_info["reports_by_ingredients"]["file"] = reports_by_ingredients_path
+        dataset_info["reports_by_ingredients"]["file"] = os.path.basename(reports_by_ingredients_path)
         dataset_info["reports_by_ingredients"]["shape"] = (nrows, ncols)
         dataset_info["reports_by_ingredients"]["density"] = 100*len(row_ind)/float(nrows*ncols)
-        save_json(dataset_info_path, dataset_info)
+
         save_json(os.path.join(dataset_path, "ingredient2index.json"), ingredient2index)
+        dataset_info["ingredient2index"]["md5"] = generate_file_md5(os.path.join(dataset_path, "ingredient2index.json"))
+        dataset_info["ingredient2index"]["file"] = "ingredient2index.json"
+
+        save_json(dataset_info_path, dataset_info)
+
 
         del(reports_by_ingredients)
         del(ingredient_indices)
@@ -347,11 +362,16 @@ def build_dataset(proc_status, endpoint, start_year, end_year):
 
         sp.sparse.save_npz(reports_by_drugs_path, reports_by_drugs)
         dataset_info["reports_by_drugs"]["md5"] = generate_file_md5(reports_by_drugs_path)
-        dataset_info["reports_by_drugs"]["file"] = reports_by_drugs_path
+        dataset_info["reports_by_drugs"]["file"] = os.path.basename(reports_by_drugs_path)
         dataset_info["reports_by_drugs"]["shape"] = (nrows, ncols)
         dataset_info["reports_by_drugs"]["density"] = 100*len(row_ind)/float(nrows*ncols)
-        save_json(dataset_info_path, dataset_info)
+
         save_json(os.path.join(dataset_path, "drug2index.json"), drug2index)
+        dataset_info["drug2index"]["md5"] = generate_file_md5(os.path.join(dataset_path, "drug2index.json"))
+        dataset_info["drug2index"]["file"] = "drug2index.json"
+
+        save_json(dataset_info_path, dataset_info)
+
 
         del(reports_by_drugs)
         del(drug_indices)
@@ -366,11 +386,16 @@ def build_dataset(proc_status, endpoint, start_year, end_year):
 
         sp.sparse.save_npz(reports_by_indications_path, reports_by_indications)
         dataset_info["reports_by_indications"]["md5"] = generate_file_md5(reports_by_indications_path)
-        dataset_info["reports_by_indications"]["file"] = reports_by_indications_path
+        dataset_info["reports_by_indications"]["file"] = os.path.basename(reports_by_indications_path)
         dataset_info["reports_by_indications"]["shape"] = (nrows, ncols)
         dataset_info["reports_by_indications"]["density"] = 100*len(row_ind)/float(nrows*ncols)
-        save_json(dataset_info_path, dataset_info)
+
         save_json(os.path.join(dataset_path, "indication2index.json"), indication2index)
+        dataset_info["indication2index"]["md5"] = generate_file_md5(os.path.join(dataset_path, "indication2index.json"))
+        dataset_info["indication2index"]["file"] = "indication2index.json"
+
+        save_json(dataset_info_path, dataset_info)
+
 
         del(reports_by_indications)
         del(indication_indices)
@@ -406,7 +431,7 @@ def build_dataset(proc_status, endpoint, start_year, end_year):
         reactions_nodup.to_csv(reactions_path, index=False)
 
         dataset_info["reactions"]["md5"] = generate_file_md5(reactions_path)
-        dataset_info["reactions"]["file"] = reactions_path
+        dataset_info["reactions"]["file"] = os.path.basename(reactions_path)
         save_json(dataset_info_path, dataset_info)
 
         del(reactions)
@@ -422,13 +447,13 @@ def build_dataset(proc_status, endpoint, start_year, end_year):
         print(f"ok. Memory usage is: {process_memory():.2f}GB")
     else:
         reaction2index = dict()
-        reaction_indices = list()
+        reaction_indices = set()
 
         print(f"  Compiling information to build (report by reaction) matrix. Memory usage is: {process_memory():.2f}GB")
 
         for _, row in tqdm(reactions_nodup.iterrows(), total=reactions_nodup.shape[0]):
 
-            if not report2index.get(row['safetyreportid']):
+            if report2index.get(row['safetyreportid'], -1) == -1:
                 # duplicate id that we are not using
                 continue
 
@@ -443,7 +468,7 @@ def build_dataset(proc_status, endpoint, start_year, end_year):
 
             col_idx = reaction2index[row['pt_meddra_id']]
 
-            reaction_indices.append( (row_idx, col_idx) )
+            reaction_indices.add( (row_idx, col_idx) )
 
         print(f"  Building reports x reactions matrix. Memory usage is: {process_memory():.2f}GB")
         row_ind, col_ind = zip(*reaction_indices)
@@ -454,11 +479,15 @@ def build_dataset(proc_status, endpoint, start_year, end_year):
 
         sp.sparse.save_npz(reports_by_reactions_path, reports_by_reactions)
         dataset_info["reports_by_reactions"]["md5"] = generate_file_md5(reports_by_reactions_path)
-        dataset_info["reports_by_reactions"]["file"] = reports_by_reactions_path
+        dataset_info["reports_by_reactions"]["file"] = os.path.basename(reports_by_reactions_path)
         dataset_info["reports_by_reactions"]["shape"] = (nrows, ncols)
         dataset_info["reports_by_reactions"]["density"] = 100*len(row_ind)/float(nrows*ncols)
-        save_json(dataset_info_path, dataset_info)
+
         save_json(os.path.join(dataset_path, "reaction2index.json"), reaction2index)
+        dataset_info["reaction2index"]["md5"] = generate_file_md5(os.path.join(dataset_path, "reaction2index.json"))
+        dataset_info["reaction2index"]["file"] = "reaction2index.json"
+
+        save_json(dataset_info_path, dataset_info)
 
         del(reports_by_reactions)
         del(reaction_indices)
