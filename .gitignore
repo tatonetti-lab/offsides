@@ -3,6 +3,9 @@ data
 data/
 .DS_Store
 *git_ignore*
+onsides-2.0.0
+v2.0.0.tar.gz
+data.zip
 
 # Byte-compiled / optimized / DLL files
 __pycache__/

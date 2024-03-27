@@ -238,11 +238,13 @@ def process(proc_status, proc_status_path, args, single_ep = 'all', single_subpa
     if not proc_status["downloaded"] == "yes":
         print("WARNING: Processor status shows the files have not all downloaded. Will continue with processing but there may be missing data in the resulting files.")
 
+    # TODO: Move this check to before any downloading and processing has taken place.
+    # TODO: as it is, it interupts the flow of the application and causes issues. 
     if not os.path.exists(RXNORM_P2I_PATH):
         raise Exception(f"ERROR: Necessary file, {RXNORM_P2I_PATH}, is missing. \n\nThe missing file can be downloaded as part of the latest OnSIDES Data Release (see github.com/tatonetti-lab/onsides/releases). The file is included as part of the onsides_VERSION_DATE.tar.gz archive. For example you can download with:\n\nwget https://github.com/tatonetti-lab/onsides/archive/refs/tags/v2.0.0.tar.gz\n\nDownload the archive and extract the 'rxnorm_product_to_ingredient.csv.gz' file to the local ./data directory.")
 
     # will be set to True automatically in single_ep, single_subpath mode
-    local_processing_info = False
+    #local_processing_info = False
 
     # Load the RxNorm product to ingredient map
     print("Loading the RxNorm dictionary into memory.")
@@ -266,6 +268,8 @@ def process(proc_status, proc_status_path, args, single_ep = 'all', single_subpa
     fh.close()
 
     # Load the PT to LLT map
+    # TODO: Move this check to before any downloading and processing has taken place.
+    # TODO: as it is, it interupts the flow of the application and causes issues. 
     print("Loading the MedDRA dictionary into memory.")
     if not os.path.exists(MEDDRA_PT_LLT_PATH):
         raise Exception(f"ERROR: Necessary file, {MEDDRA_PT_LLT_PATH}, is missing. \n\nThe missing file requires a licence to use MedDRA. It is provided as part of the 'data.zip' archive provided witch each OnSIDES Release (see github.com/tatonetti-lab/onsides/releases). For example you can download the archive with: \n\nwget https://github.com/tatonetti-lab/onsides/releases/download/v2.0.0/data.zip\n\nMove the `meddra_llt_pt_map.txt` file into the OffSIDES local data directory. Please secure the appropriate licensing before use.")
@@ -300,11 +304,11 @@ def process(proc_status, proc_status_path, args, single_ep = 'all', single_subpa
         if not "processing" in proc_status["endpoints"][ep]:
             proc_status["endpoints"][ep]["processing"] = {}
 
-        if single_ep != 'all' and single_subpath is not None:
+        if args.multi:
             # running in single iteration mode, likely for multiprocessing
             # in this case we use a local version of the processing json
             # to avoid conflicts
-            local_processing_info = True
+            #local_processing_info = True
             processing_status_path = os.path.join(DATA_DIR, single_ep, "event", single_subpath, 'local_processing_status.json')
             print(f"Running in single directory mode, will use a local status dictionary saved at {processing_status_path}.")
             if not os.path.exists(processing_status_path):
@@ -356,9 +360,9 @@ def process(proc_status, proc_status_path, args, single_ep = 'all', single_subpa
             print(f"  Processing {subpath}...")
 
             zipjsons = [f for f in os.listdir(os.path.join(event_dir, subpath)) if f.endswith('.json.zip')]
-
-            if not subpath in processing_info and not local_processing_info and os.path.exists(os.path.join(DATA_DIR, ep, "event", subpath, 'local_processing_status.json')):
-                # If not in single run mode and the status of this subpath is not in our primary
+            # print(processing_info)
+            if not subpath in processing_info and not args.multi and os.path.exists(os.path.join(DATA_DIR, ep, "event", subpath, 'local_processing_status.json')):
+                # If not in multiprocessing mode and the status of this subpath is not in our primary
                 # status json file, then we check to see if there's a locally stored json file.
                 print("  > Found local processing status file. Loading status from there into main file.")
                 local_info = load_json(os.path.join(DATA_DIR, ep, "event", subpath, 'local_processing_status.json'))
@@ -376,17 +380,16 @@ def process(proc_status, proc_status_path, args, single_ep = 'all', single_subpa
                     "reactions": os.path.join(event_dir, subpath, 'reactions.csv.gz'),
                     "log": os.path.join(event_dir, subpath, 'faers_processor.log')
                 }
-                if local_processing_info:
+                if args.multi:
                     save_json(processing_status_path, processing_info)
                 else:
                     save_json(proc_status_path, proc_status)
             else:
-                if local_processing_info:
-                    # Running in single ep, single subpath mode. It is unusual
-                    # that the subpath is already in the json file, which means
-                    # that another job may have already started this run. We will
-                    # print an error message and quit.
-                    raise Exception("ERROR: Might have encountered a job in progress already. Quitting.")
+                if args.multi:
+                    # If running in multiprocessing mode, it may be beneficial to uncomment
+                    # this line to avoid running the same directory twice. 
+                    # raise Exception("ERROR: Might have encountered a job in progress already. Quitting.")
+                    pass
 
             if processing_info[subpath]["status"] == "complete":
                 print(f"    > Processing for these files is already complete.")
@@ -584,14 +587,14 @@ def process(proc_status, proc_status_path, args, single_ep = 'all', single_subpa
             processing_info[subpath]["status"] = "complete"
             processing_info[subpath]["processing_time_min"] = (time.time()-start_time)/60.
 
-            if local_processing_info:
+            if args.multi:
                 save_json(processing_status_path, processing_info)
             else:
                 save_json(proc_status_path, proc_status)
 
             # end "for subpath in subpaths:"
 
-def check_process(proc_status, proc_status_path):
+def check_process(proc_status, proc_status_path, args):
 
     print("Checking completeness of processing...")
 
@@ -606,7 +609,7 @@ def check_process(proc_status, proc_status_path):
             # processing not started, will skip to next endpoint to check
             endpoints_complete = False
             continue
-
+        
         processing_info = proc_status["endpoints"][ep]["processing"]
 
         subpaths_complete = True
@@ -627,8 +630,11 @@ def check_process(proc_status, proc_status_path):
             endpoints_complete = False
 
     if endpoints_complete:
-        print(f"All endpoints have been procsessed.")
-        proc_status["processed"] = "yes"
+        print(f"All existing endpoints have been procsessed.")
+        if not (args.multi or args.subpath is not None):
+            # not running in single subpath mode nor multiprocessing mode
+            proc_status["processed"] = "yes"
+        
         save_json(proc_status_path, proc_status)
 
 def clean(proc_status, proc_status_path, args):
@@ -670,11 +676,15 @@ def main():
     parser.add_argument('--endpoint', default='all', help='Which endpoints to download For a list of available endpoints see the keys in the results section of the download.json file. Defautl is all endpoints.', type=str, required=False)
     parser.add_argument('--subpath', default=None, help="Used to identify a particular event sub-directory to process. Must be spected with a specific endpoint using the --endpoint flag. Purpose to to enable simple multi-processing.")
     parser.add_argument('--clean', default=False, help="Remove processing files.", action="store_true")
-
+    parser.add_argument('--multi', default=False, help="Flag to indicate multiprocessing mode. Intended to be used with a job scheduler that submits one subpath at a time for processing.", action="store_true")
+    parser.add_argument('--year', default=None, help="Used to specify a specific year to process. Must be used with --endpoint=drug.", type=int, required=False)
     args = parser.parse_args()
 
-    if args.subpath is not None and args.endpoint == 'all':
-        raise Exception("ERROR: --subpath cannot be set while --endpoint is set to 'all'")
+    if (args.subpath is not None or args.year is not None) and args.endpoint == 'all':
+        raise Exception("ERROR: --subpath and --year cannot be set while --endpoint is set to 'all'")
+
+    if args.multi and (args.subpath is None or args.year is None):
+        raise Exception("ERROR: --multi cannot be set without also setting --subpath or --year")
 
     if not args.endpoint in ('all', 'device', 'drug', 'food'):
         raise Exception("ERROR: --endpoint must be one of 'all', 'device', 'drug', or 'food'")
@@ -701,10 +711,18 @@ def main():
     #####
     # Download the openFDA files
     #####
-
+    
     if proc_status["downloaded"] == "no":
-        download(proc_status, proc_status_path, args)
-        check_downloads(proc_status, proc_status_path, args)
+        if args.year is not None:
+            for suffix in ('q1', 'q2', 'q3', 'q4'):
+                args.subpath = f"{args.year}{suffix}"
+                download(proc_status, proc_status_path, args)
+                check_downloads(proc_status, proc_status_path, args)
+        else:
+            download(proc_status, proc_status_path, args)
+            check_downloads(proc_status, proc_status_path, args)
+        
+        
 
     #####
     # Process downloaded files
@@ -718,8 +736,16 @@ def main():
     #  - compile a meta data table for reports
     #####
     if proc_status["processed"] == "no":
-        process(proc_status, proc_status_path, args, single_ep = args.endpoint, single_subpath = args.subpath)
-        check_process(proc_status, proc_status_path)
+        if args.year is not None:
+            for suffix in ('q1', 'q2', 'q3', 'q4'):
+                args.subpath = f"{args.year}{suffix}"
+                process(proc_status, proc_status_path, args, single_ep = args.endpoint, single_subpath = args.subpath)
+                check_process(proc_status, proc_status_path, args)
+        else:
+            process(proc_status, proc_status_path, args, single_ep = args.endpoint, single_subpath = args.subpath)
+            check_process(proc_status, proc_status_path, args)
+        
+        
 
 if __name__ == '__main__':
     main()
