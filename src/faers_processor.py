@@ -1,4 +1,6 @@
 """
+Step 1.
+
 Manage the latest available FDA Adverse Event Reporting System downloads.
 
 See for download instructions:
@@ -445,8 +447,8 @@ def process(proc_status, proc_status_path, args, single_ep = 'all', single_subpa
                                 patient_data.append((property, patient.get(property, None)))
                                 report_key_items.append(patient.get(property, None))
 
-                            report_header, report_data = zip(*(report_data + patient_data))
-                            # print(report_header)
+                            _, report_data = zip(*(report_data + patient_data))
+                            # print(_)
 
                             # extract the drug information
                             drugs_data = list()

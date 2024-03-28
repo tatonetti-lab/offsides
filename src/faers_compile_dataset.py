@@ -1,6 +1,7 @@
 """
-Compile a dataset for analysis from the pre-processed files.
+Step 2.
 
+Compile a dataset for analysis from the pre-processed files.
 
 """
 

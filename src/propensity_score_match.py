@@ -1,4 +1,6 @@
 """
+Step 3.
+
 The first step of the SCRUB Method (Tatonetti, et al. Sci Trans Med 2012)
 is to use propensity score matching to control for potential confounding
 biases between exposed reports and unexposed reports.
@@ -102,7 +104,7 @@ def resample_using_model(lr, features, labels, nsamples = 100_000, nbins=100, mi
     # build a kernel based on the exposed data (we want to match this distr.)
     try:
         kernel = sp.stats.gaussian_kde(predictions[exposed_indexes])
-    except numpy.linalg.LinAlgError:
+    except np.linalg.LinAlgError:
         return {
             "predictions": np.array([]),
             "exposed_sample": np.array([]),
@@ -155,11 +157,12 @@ def droprare(dataset_path, dataset_info, min_reports):
     features = sp.sparse.hstack([reports_by_drugs, reports_by_indications])
 
     print(f"  Dropping columns without enough data.")
+    #print(f"    features.shape={features.shape}")
     original_ncols = features.shape[1]
     gtrmin_mask = np.squeeze(np.asarray(features.sum(axis=0) > min_reports))
     features = features[:,gtrmin_mask]
     print(f"    Reduced columns from {original_ncols} to {features.shape[1]}, a {100*(original_ncols-features.shape[1])/original_ncols:.2f}% reduction.")
-
+    #print(f"      features.shape={features.shape}")
     return features
 
 def get_features(dataset_info, feature_method, dataset_path, droprare_min):
@@ -190,7 +193,7 @@ def get_labels(dataset_info, dataset_path, exposed_min):
     reports_by_ingredients = sp.sparse.load_npz(os.path.join(dataset_path, dataset_info['reports_by_ingredients']['file']))
     ingredient2index = load_json(os.path.join(dataset_path, dataset_info['ingredient2index']['file']))
     ordered_ingredients = list(zip(*sorted([(idx, ing) for ing, idx in ingredient2index.items()])))[1]
-
+    
     print(f"  Removing examples with too few reports.")
     original_ncols = reports_by_ingredients.shape[1]
     gtrmin_mask = np.squeeze(np.asarray(reports_by_ingredients.sum(axis=0) > exposed_min))
