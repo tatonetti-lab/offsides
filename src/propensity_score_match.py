@@ -49,7 +49,7 @@ def build_model(features, labels, i, tanimoto_filter):
 
     if tanimoto_filter:
         i_features, feature_mask = filter_features_by_tanimoto(i_features, i_labels, 0, 0.4)
-        feature_masks.append(feature_mask)
+        # feature_masks.append(feature_mask)
 
     if i_labels.sum() == 0 or (tanimoto_filter and len(feature_mask) == 0):
         return None
@@ -58,6 +58,9 @@ def build_model(features, labels, i, tanimoto_filter):
 
     lr = LinearRegression()
     lr.fit(i_features, i_labels)
+
+    # TODO: Calculate performance statistics and save to a file.
+    # TODO: AUROC, AUPR, Max-F1
 
     return lr, i_features, i_labels
 
@@ -75,7 +78,7 @@ def build_models(features, labels, max_iters=50, show_progress=True, tanimoto_fi
         models.append( lr )
 
     if tanimoto_filter:
-        return models, feature_masks
+        return models, None # feature_masks
 
     return models
 
@@ -228,6 +231,11 @@ def build_propensity_models(dataset_info, dataset_path, features, labels, colnam
     too_few_samples = set()
     too_few_controls = set()
 
+    # TODO: Refactor so that each (ingredient, adminroute) set of matches
+    # TODO: are saved to their own file. Currently we're saving the entire `match_data`
+    # TODO: dictionary and it's really huge (even with just 10 sets of controls).
+    # TODO: This will not scale well if we go to 100 sets of controls, which is desired.
+
     for i in tqdm(range(labels.shape[1]), bar_format='{l_bar}{bar:10}{r_bar}{bar:-10b}'):
         samples = list()
         for _ in range(n):
@@ -247,6 +255,11 @@ def build_propensity_models(dataset_info, dataset_path, features, labels, colnam
         if len(samples) < n:
             # didn't get enough samples
             continue
+        
+        # TODO: Related to the TODO above. No need to save this all in one
+        # TODO: match object. Instead save each `samples`` to it's own matches/psm_match_data_{i}.pkl
+        # TODO: file. Keep track of the files name sthough and add them to the dataset_info json object
+        # TODO: below. 
 
         match_data[i] = samples
 
@@ -270,8 +283,8 @@ def main():
     parser.add_argument('--dataset', help='Path to the spontaneous reporting system dataset files built with faers_compile_dataset.py', type=str, required=True)
     parser.add_argument('--exposed-min', help='The minimum number of reports for an ingredient (ingredient_rxcui, route) to build a PSM for. Default is 10.', type=int, required=False, default=10)
     parser.add_argument('--feature-method', help="Which method to use to pre-process the features for propensity score matching.", type=str, default='droprare', required=False)
-    parser.add_argument('--num-samples', help="The number of sets of controls that will be sampled using the propensity scores.", type=int, required=False, default=100)
-    parser.add_argument('-n', help="The number of times to match between cases and controls. Default is 10.", type=int, default=10, required=False)
+    # parser.add_argument('--num-samples', help="The number of sets of controls that will be sampled using the propensity scores.", type=int, required=False, default=100)
+    parser.add_argument('-n', '--num-samples', help="The number of times to match between cases and controls. Default is 10.", type=int, default=10, required=False)
     parser.add_argument('-k', help="The number of singular values to use to generate the principle components. Default is 100.", type=int, default=100, required=False)
     # arguments specific to sub-methods and/or sub-steps
     parser.add_argument('--droprare-min', help="Used for 'droprare' feature method. The minimum number of reports for a feature to be included in the PSM. Default is 10.", type=int, required=False, default=10)
@@ -279,9 +292,9 @@ def main():
     args = parser.parse_args()
 
     print(f"Running propensity_score_match.py with: ")
-    print(f"  dataset: {args.dataset}")
+    print(f"  dataset: {args.dataset}") 
     print(f"  exposed-min: {args.exposed_min}")
-    print(f"  num-samples: {args.num_samples}")
+    print(f"  num-samples: {args.n}")
     print(f"  feature-method: {args.feature_method}")
     if args.feature_method == 'droprare':
         print(f"    droprare-min: {args.droprare_min}")
@@ -302,7 +315,7 @@ def main():
     #
     # 3. Apply PSM for each ingredient and choose reports. We choose the reports to match the
     #    distribution of propensity scores for the exposed reports to the unexposed reports through a biased random
-    #    sampling of the unexposed reports. We repeat this sampling args.num_samples number of times. These will be used
+    #    sampling of the unexposed reports. We repeat this sampling args.n number of times. These will be used
     #    to generate a distribution of association statistics in downstream analysis.
     ############
 
