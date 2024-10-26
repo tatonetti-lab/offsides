@@ -21,6 +21,8 @@ from tqdm.auto import tqdm
 from functools import reduce
 from datetime import datetime
 
+from collections import defaultdict
+
 # requires python ≥ 3.5
 from pathlib import Path
 
@@ -35,7 +37,7 @@ def process_memory():
     # return memory used in gigabytes
     return mem_info.rss/1024/1024/1024
 
-def build_dataset(proc_status, endpoint, start_year, end_year):
+def build_dataset(proc_status, endpoint, start_year, end_year, include_routes=False):
     """
     Build a dataset from the pre-processed FAERS event files for the given
     endpoint and year range. There are three files that will be concatenated
@@ -114,6 +116,7 @@ def build_dataset(proc_status, endpoint, start_year, end_year):
             "start_year": start_year,
             "end_year": end_year,
             "all_years": all_subpaths,
+            "include_routes": include_routes,
             # concatenated versions of each subpath file
             "reports": {"file": "", "md5": ""},
             "drugs": {"file": "", "md5": ""},
@@ -133,7 +136,12 @@ def build_dataset(proc_status, endpoint, start_year, end_year):
             "ingredient2index": {"file": "", "md5": ""},
             "reaction2index": {"file": "", "md5": ""},
             "drug2index": {"file": "", "md5": ""},
-            "indication2index": {"file": "", "md5": ""}
+            "indication2index": {"file": "", "md5": ""},
+            # convenience files
+            "ingredient2report": {"file": "", "md5": ""},
+            "drug2report": {"file": "", "md5": ""},
+            "indication2report": {"file": "", "md5": ""},
+            "reaction2report": {"file": "", "md5": ""}
 
 
             # NOTE:
@@ -296,11 +304,15 @@ def build_dataset(proc_status, endpoint, start_year, end_year):
         drug_indices = set()
         indication_indices = set()
 
+        ingredient2report = defaultdict(lambda: defaultdict(set))
+        drug2report = defaultdict(set)
+        indication2report = defaultdict(set)
+
         print(f"  Compiling information to build matrices. Memory usage is: {process_memory():.2f}GB")
 
         for _, row in tqdm(drugs_nodup.iterrows(), total=drugs_nodup.shape[0]):
 
-            if not report2index.get(row['safetyreportid']):
+            if report2index.get(row['safetyreportid'], -1) == -1:
                 # duplicate id that we are not using
                 continue
 
@@ -309,11 +321,19 @@ def build_dataset(proc_status, endpoint, start_year, end_year):
 
             # ingredients
             if not pd.isna(row['ingredient_rxcui']):
-                ingredient = f"{row['ingredient_rxcui']}_{row['drugadministrationroute']}"
+                if include_routes:
+                    ingredient = f"{row['ingredient_rxcui']}_{row['drugadministrationroute']}"
+                else:
+                    ingredient = row['ingredient_rxcui']
+
                 if ingredient2index.get(ingredient, -1) == -1:
                     ingredient2index[ingredient] = len(ingredient2index)
 
                 ingredient_indices.add( (row_idx, ingredient2index[ingredient]) )
+
+                # add to dictionary
+                ingredient2report[ingredient]['report_ids'].add(row['safetyreportid'])
+                ingredient2report[ingredient]['names'].add(row['medicinalproduct'])
 
             # drugs
             if not pd.isna(row['ingredient_rxcui']) or not pd.isna(row['medicinalproduct']):
@@ -323,13 +343,37 @@ def build_dataset(proc_status, endpoint, start_year, end_year):
 
                 drug_indices.add( (row_idx, drug2index[drug]) )
 
+                # add to dictionary
+                drug2report[drug].add(row['safetyreportid'])
+
             # indications
+            # TODO: Map these indications to a terminology and use that as the key/index instead.
             if not pd.isna(row['drugindication']):
                 if indication2index.get(row['drugindication'], -1) == -1:
                     indication2index[row['drugindication']] = len(indication2index)
 
                 indication_indices.add( (row_idx, indication2index[row['drugindication']]) )
 
+                # add to dictionary
+                indication2report[row['drugindication']].add(row['safetyreportid'])
+
+        save_json(os.path.join(dataset_path, "ingredient2report.json"), {outer_key: {inner_key: list(inner_value) 
+                                                                        for inner_key, inner_value in outer_dict.items()}
+                                                                        for outer_key, outer_dict in ingredient2report.items()})
+        del(ingredient2report)
+        dataset_info["ingredient2report"]["md5"] = generate_file_md5(os.path.join(dataset_path, "ingredient2report.json"))
+        dataset_info["ingredient2report"]["file"] = "ingredient2report.json"
+
+        save_json(os.path.join(dataset_path, "drug2report.json"), {key: list(value) for key, value in drug2report.items()})
+        del(drug2report)
+        dataset_info["drug2report"]["md5"] = generate_file_md5(os.path.join(dataset_path, "drug2report.json"))
+        dataset_info["drug2report"]["file"] = "drug2report.json"
+
+        save_json(os.path.join(dataset_path, "indication2report.json"), {key: list(value) for key, value in indication2report.items()})
+        del(indication2report)
+        dataset_info["indication2report"]["md5"] = generate_file_md5(os.path.join(dataset_path, "indication2report.json"))
+        dataset_info["indication2report"]["file"] = "indication2report.json"
+        
         print(f"  Building reports x ingredients matrix. Memory usage is: {process_memory():.2f}GB")
         row_ind, col_ind = zip(*ingredient_indices)
         data = np.repeat(1, len(row_ind))
@@ -348,7 +392,6 @@ def build_dataset(proc_status, endpoint, start_year, end_year):
         dataset_info["ingredient2index"]["file"] = "ingredient2index.json"
 
         save_json(dataset_info_path, dataset_info)
-
 
         del(reports_by_ingredients)
         del(ingredient_indices)
@@ -440,6 +483,8 @@ def build_dataset(proc_status, endpoint, start_year, end_year):
     #####
     # reports by reactions
 
+    reaction2report = defaultdict(set)
+
     reports_by_reactions_path = os.path.join(dataset_path, f"reports_by_reactions.npz")
 
     if os.path.exists(reports_by_reactions_path) and generate_file_md5(reports_by_reactions_path) == dataset_info["reports_by_reactions"]["md5"]:
@@ -463,13 +508,19 @@ def build_dataset(proc_status, endpoint, start_year, end_year):
                 continue
 
             row_idx = report2index[row['safetyreportid']]
-
-            if not reaction2index.get(row['pt_meddra_id']):
+            
+            if reaction2index.get(row['pt_meddra_id'], -1) == -1:
                 reaction2index[row['pt_meddra_id']] = len(reaction2index)
 
             col_idx = reaction2index[row['pt_meddra_id']]
 
             reaction_indices.add( (row_idx, col_idx) )
+            reaction2report[row['pt_meddra_id']].add(row['safetyreportid'])
+        
+        save_json(os.path.join(dataset_path, "reaction2report.json"), {key: list(value) for key, value in reaction2report.items()})
+        del(reaction2report)
+        dataset_info["reaction2report"]["md5"] = generate_file_md5(os.path.join(dataset_path, "indication2report.json"))
+        dataset_info["reaction2report"]["file"] = "reaction2report.json"
 
         print(f"  Building reports x reactions matrix. Memory usage is: {process_memory():.2f}GB")
         row_ind, col_ind = zip(*reaction_indices)
@@ -501,7 +552,8 @@ def main():
     parser = argparse.ArgumentParser()
     parser.add_argument('--endpoint', default='drug', help='Which endpoints to download For a list of available endpoints see the keys in the results section of the download.json file. Defautl is all endpoints.', type=str, required=True)
     parser.add_argument('--years', type=str, default=None, help="Restrict dataset to a given set of years. Must be provided in the following format: YYYY-YYYY or for an individual year: YYYY")
-
+    parser.add_argument('--include-routes', action='store_true', default=False, help="Build dataset using (ingredient, route) pairs instead of ingredients alone.")
+    
     args = parser.parse_args()
 
     proc_status_path = os.path.join(DATA_DIR, 'processer_status.json')
@@ -518,7 +570,7 @@ def main():
     else:
         start_year, end_year  = map(int, args.years.split('-'))
 
-    build_dataset(proc_status, args.endpoint, start_year, end_year)
+    build_dataset(proc_status, args.endpoint, start_year, end_year, include_routes=args.include_routes)
 
 if __name__ == '__main__':
     main()
