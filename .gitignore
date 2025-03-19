@@ -6,6 +6,8 @@ data/
 onsides-2.0.0
 v2.0.0.tar.gz
 data.zip
+config.json
+results/
 
 # Byte-compiled / optimized / DLL files
 __pycache__/

@@ -13,9 +13,15 @@ those that are "off-label" are included in this resource. For known drug side ef
 
 The process of creating the OffSIDES resource is broken down into the following steps:
 
-1. Download and process the latest FAERS data from opendata.fda.gov (see faers_processor.py). 
-2. Compile a "dataset" from the processed data (see faers_compile_dataset.py)
-3. Run high-dimensional propensity score matching on the drug reports (see propensity_score_match.py)
-4. Generate disproportionality statistics (TBW)
+1. Download and process the latest FAERS data (e.g. from opendata.fda.gov)
+2. Choose a date range and strata to run the anlaysis on.
+3. Run high-dimensional propensity score matching on the drug report.
+4. Generate disproportionality statistics
+
+## Required Files
+
+A recent copy of RxNorm is required to run OffSIDES. You can download the most recent verison here: https://www.nlm.nih.gov/research/umls/rxnorm/index.html
+
+
 
 
