@@ -11,10 +11,11 @@ from collections import defaultdict
 class PostgresDB:
     """Class to handle PostgreSQL connection and queries."""
     
-    def __init__(self, config_file="config.json"):
+    def __init__(self, config_file="config.json", verbose=True):
         self.config = self.load_config(config_file)
         self.connection = None
         self.cursor = None
+        self.verbose = verbose
 
     def load_config(self, config_file):
         """Load database configuration from JSON file."""
@@ -27,9 +28,12 @@ class PostgresDB:
             self.connection = psycopg2.connect(**self.config)
             self.cursor = self.connection.cursor()
 
-    def execute_query(self, query, fetch_all=True):
+    def execute_query(self, query, fetch_all=True, verbose=None):
         """Execute a SQL query and return results."""
         self.connect()  # Ensure connection is open
+        if verbose is None:
+            verbose = self.verbose
+        
         start_time = time.time()
         self.cursor.execute(query)
 
@@ -40,7 +44,8 @@ class PostgresDB:
             result = None  # For INSERT, UPDATE, DELETE
         
         exec_time = time.time()-start_time
-        print(f" Query completed in {exec_time}s")
+        if verbose:
+            print(f" Query completed in {exec_time}s")
         
         return result
 
@@ -65,14 +70,14 @@ select
         when patientonsetage::int > 60 then 'Older'
         else 'Middle'
     end as age_group, 
-    generic_name, count(distinct safetyreport.id)
+    ingredient_concept_name, count(distinct safetyreport.id)
 from safetyreport
 join drug on (safetyreport_id = safetyreport.id)
+join ingredient on (drug.id = ingredient.id)
 WHERE LEFT(receivedate, 4)::int BETWEEN {start_year} AND {end_year}
 and patientonsetageunit = '801'
 and patientonsetage::int < 130
-and generic_name is not null
-group by age_group, generic_name
+group by age_group, ingredient_concept_name
 """
     try:
         results = db.execute_query(query)
@@ -112,15 +117,15 @@ group by age_group
     print('Querying for drug counts...')
     drug_count = defaultdict(int)
     query = f"""
-select generic_name, count(distinct safetyreport_id)
+select ingredient_concept_name, count(distinct safetyreport_id)
 from drug
+join ingredient on (ingredient.id = drug.id)
 join safetyreport on (safetyreport_id = safetyreport.id)
 where left(receivedate, 4)::int between {start_year} and {end_year}
 and drugindication is not NULL
-and generic_name is not NULL
 and patientsex is not NULL
 and patientsex != '0'
-group by generic_name
+group by ingredient_concept_name
 """
     try:
         results = db.execute_query(query)
@@ -443,14 +448,14 @@ def sex_by_drug_matrix(db, start_year, end_year, min_reports, save_to_file=False
     print('Querying for sex, drug counts...')
     sex_drug_count = defaultdict(int)
     query = f"""
-select patientsex, generic_name, count(distinct safetyreport_id)
+select patientsex, ingredient_concept_name, count(distinct safetyreport_id)
 from drug
+join ingredient on (ingredient.id = drug.id)
 join safetyreport on (safetyreport_id = safetyreport.id)
 where LEFT(receivedate,4)::int BETWEEN {start_year} and {end_year}
 and patientsex is not null
 and patientsex != '0'
-and generic_name is not null
-group by patientsex, generic_name
+group by patientsex, ingredient_concept_name
 """
     try:
         results = db.execute_query(query)
@@ -484,15 +489,15 @@ group by patientsex
     print('Querying for drug counts...')
     drug_count = defaultdict(int)
     query = f"""
-select generic_name, count(distinct safetyreport_id)
+select ingredient_concept_name, count(distinct safetyreport_id)
 from drug
+join ingredient on (ingredient.id = drug.id)
 join safetyreport on (safetyreport_id = safetyreport.id)
 where left(receivedate, 4)::int between {start_year} and {end_year}
 and drugindication is not NULL
-and generic_name is not NULL
 and patientsex is not NULL
 and patientsex != '0'
-group by generic_name
+group by ingredient_concept_name
 """
     try:
         results = db.execute_query(query)
@@ -566,15 +571,15 @@ def drug_by_drug_matrix(db, start_year, end_year, min_reports, save_to_file=Fals
     # (drug, drug) counts
     drug_drug_count = defaultdict(int)
     query = f"""
-select a.generic_name, b.generic_name, count(distinct safetyreport_id)
+select aa.ingredient_concept_name, bb.ingredient_concept_name, count(distinct safetyreport_id)
 from drug a
+join ingredient aa on (aa.id = a.id)
 join safetyreport ON (safetyreport_id = safetyreport.id)
 join drug b using (safetyreport_id)
-where a.generic_name != b.generic_name
-and a.generic_name is not NULL
-and b.generic_name is not NULL
+join ingredient bb on (bb.id = b.id)
+where aa.ingredient_concept_name != bb.ingredient_concept_name
 and LEFT(receivedate,4)::int BETWEEN {start_year} and {end_year}
-group by a.generic_name, b.generic_name
+group by aa.ingredient_concept_name, bb.ingredient_concept_name
 having count(distinct safetyreport_id) >= {min_reports}
 """
     try:
@@ -591,12 +596,12 @@ having count(distinct safetyreport_id) >= {min_reports}
     print('Querying for drug counts...')
     drug_count = defaultdict(int)
     query = f"""
-    SELECT generic_name, COUNT(DISTINCT safetyreport_id)
+    SELECT ingredient_concept_name, COUNT(DISTINCT safetyreport_id)
     FROM drug
+    JOIN ingredient on (ingredient.id = drug.id)
     JOIN safetyreport ON (safetyreport_id = safetyreport.id)
     WHERE LEFT(receivedate, 4)::int BETWEEN {start_year} AND {end_year}
-    AND generic_name IS NOT NULL
-    GROUP BY generic_name
+    GROUP BY ingredient_concept_name
     HAVING COUNT(DISTINCT safetyreport_id) >= {min_reports};
     """
     try:
@@ -648,7 +653,7 @@ having count(distinct safetyreport_id) >= {min_reports}
             data.append([d1, d2, a, b, c, d, OR, PRR, PHI])
 
     # Create DataFrame
-    df = pd.DataFrame(data, columns=['drug1', 'drug2', 'a', 'b', 'c', 'd', 'OR', 'PRR', 'PHI'])
+    df = pd.DataFrame(data, columns=['conf_drug', 'drug', 'a', 'b', 'c', 'd', 'OR', 'PRR', 'PHI'])
 
     # Optionally save to file
     if save_to_file:
@@ -667,13 +672,13 @@ def drug_by_reaction_matrix(db, start_year, end_year, min_reports, save_to_file=
     print('Querying for drug, reaction counts...')
     drug_rea_count = defaultdict(int)
     query = f"""
-    SELECT generic_name, reactionmeddrapt, COUNT(DISTINCT safetyreport_id)
+    SELECT ingredient_concept_name, reactionmeddrapt, COUNT(DISTINCT safetyreport_id)
     FROM drug
+    JOIN ingredient on (ingredient.id = drug.id)
     JOIN safetyreport ON (safetyreport_id = safetyreport.id)
     JOIN reaction USING (safetyreport_id)
     WHERE LEFT(receivedate, 4)::int BETWEEN {start_year} AND {end_year}
-    AND generic_name IS NOT NULL
-    GROUP BY generic_name, reactionmeddrapt
+    GROUP BY ingredient_concept_name, reactionmeddrapt
     HAVING COUNT(DISTINCT safetyreport_id) >= {min_reports};
     """
     try:
@@ -690,12 +695,12 @@ def drug_by_reaction_matrix(db, start_year, end_year, min_reports, save_to_file=
     print('Querying for drug counts...')
     drug_count = defaultdict(int)
     query = f"""
-    SELECT generic_name, COUNT(DISTINCT safetyreport_id)
+    SELECT ingredient_concept_name, COUNT(DISTINCT safetyreport_id)
     FROM drug
+    JOIN ingredient on (ingredient.id = drug.id)
     JOIN safetyreport ON (safetyreport_id = safetyreport.id)
     WHERE LEFT(receivedate, 4)::int BETWEEN {start_year} AND {end_year}
-    AND generic_name IS NOT NULL
-    GROUP BY generic_name
+    GROUP BY ingredient_concept_name
     HAVING COUNT(DISTINCT safetyreport_id) >= {min_reports};
     """
     try:
@@ -787,13 +792,13 @@ def indication_by_drug_matrix(db, start_year, end_year, min_reports, save_to_fil
     print('Querying for indication, drug counts...')
     inddrug_count = defaultdict(int)
     query = f"""
-select drugindication, generic_name, count(distinct safetyreport_id)
+select drugindication, ingredient_concept_name, count(distinct safetyreport_id)
 from drug
+join ingredient on (ingredient.id = drug.id)
 join safetyreport on (safetyreport_id = safetyreport.id)
 where left(receivedate, 4)::int between {start_year} and {end_year}
 and drugindication is not NULL
-and generic_name is not NULL
-group by drugindication, generic_name
+group by drugindication, ingredient_concept_name
 """
     try:
         results = db.execute_query(query)
@@ -810,10 +815,10 @@ group by drugindication, generic_name
     query = f"""
 select drugindication, count(distinct safetyreport_id)
 from drug
+join ingredient on (ingredient.id = drug.id)
 join safetyreport on (safetyreport_id = safetyreport.id)
 where left(receivedate, 4)::int between {start_year} and {end_year}
 and drugindication is not NULL
-and generic_name is not NULL
 group by drugindication
 """
     try:
@@ -828,13 +833,13 @@ group by drugindication
     print('Querying for drug counts...')
     drug_count = defaultdict(int)
     query = f"""
-select generic_name, count(distinct safetyreport_id)
+select ingredient_concept_name, count(distinct safetyreport_id)
 from drug
+join ingredient on (ingredient.id = drug.id)
 join safetyreport on (safetyreport_id = safetyreport.id)
 where left(receivedate, 4)::int between {start_year} and {end_year}
 and drugindication is not NULL
-and generic_name is not NULL
-group by generic_name
+group by ingredient_concept_name
 """
     try:
         results = db.execute_query(query)
@@ -1037,12 +1042,12 @@ if __name__ == "__main__":
     end_year = start_year
     min_reports = 10
     
-    #ind_rea_df = indication_by_reaction_matrix(db, start_year, end_year, min_reports, save_to_file=True)
-    #ind_drug_df = indication_by_drug_matrix(db, start_year, end_year, min_reports, save_to_file=True)
-    #drug_rea_df = drug_by_reaction_matrix(db, start_year, end_year, min_reports, save_to_file=True)
-    #drug_drug_df = drug_by_drug_matrix(db, start_year, end_year, min_reports, save_to_file=True)
-    # sex_drug_df = sex_by_drug_matrix(db, start_year, end_year, min_reports, save_to_file=True)
-    # sex_rea_df = sex_by_reaction_matrix(db, start_year, end_year, min_reports, save_to_file=True)
-    # age_rea_df = age_by_reaction_matrix(db, start_year, end_year, min_reports, save_to_file=True)
+    ind_rea_df = indication_by_reaction_matrix(db, start_year, end_year, min_reports, save_to_file=True)
+    ind_drug_df = indication_by_drug_matrix(db, start_year, end_year, min_reports, save_to_file=True)
+    drug_rea_df = drug_by_reaction_matrix(db, start_year, end_year, min_reports, save_to_file=True)
+    drug_drug_df = drug_by_drug_matrix(db, start_year, end_year, min_reports, save_to_file=True)
+    sex_drug_df = sex_by_drug_matrix(db, start_year, end_year, min_reports, save_to_file=True)
+    sex_rea_df = sex_by_reaction_matrix(db, start_year, end_year, min_reports, save_to_file=True)
+    age_rea_df = age_by_reaction_matrix(db, start_year, end_year, min_reports, save_to_file=True)
     age_drug_df = age_by_drug_matrix(db, start_year, end_year, min_reports, save_to_file=True)
     db.close()

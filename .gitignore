@@ -8,6 +8,7 @@ v2.0.0.tar.gz
 data.zip
 config.json
 results/
+logs/
 
 # Byte-compiled / optimized / DLL files
 __pycache__/
