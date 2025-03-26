@@ -3,6 +3,7 @@ import csv
 import json
 import tqdm
 import time
+import argparse
 import psycopg2
 import numpy as np
 import pandas as pd
@@ -170,7 +171,7 @@ where left(receivedate, 4)::int between {start_year} and {end_year};
 
             OR = (a / b) / (c / d) if b > 0 and d > 0 and c > 0 else None
             PRR = (a / (a + b)) / (c / (c + d)) if c > 0 else None
-            denom = np.sqrt((a+b)*(c+d)*(b+d)*(a+c))
+            denom = np.sqrt(float((a+b)*(c+d)*(b+d)*(a+c)))
             PHI = (a*d-b*c)/denom if denom > 0 else None
 
             if OR is None and PRR is None:
@@ -335,6 +336,7 @@ join safetyreport on (safetyreport_id = safetyreport.id)
 where LEFT(receivedate,4)::int BETWEEN {start_year} and {end_year}
 and patientsex is not null
 and patientsex != '0'
+and reactionmeddrapt is not NULL
 group by patientsex, reactionmeddrapt
 """
     try:
@@ -374,6 +376,7 @@ group by patientsex
     FROM reaction
     JOIN safetyreport ON (safetyreport_id = safetyreport.id)
     WHERE LEFT(receivedate, 4)::int BETWEEN {start_year} AND {end_year}
+    AND reactionmeddrapt is not NULL
     GROUP BY reactionmeddrapt
     HAVING COUNT(DISTINCT safetyreport_id) >= {min_reports};
     """
@@ -542,7 +545,7 @@ where left(receivedate, 4)::int between {start_year} and {end_year};
 
             OR = (a / b) / (c / d) if b > 0 and d > 0 and c > 0 else None
             PRR = (a / (a + b)) / (c / (c + d)) if c > 0 else None
-            denom = np.sqrt((a+b)*(c+d)*(b+d)*(a+c))
+            denom = np.sqrt(float((a+b)*(c+d)*(b+d)*(a+c)))
             PHI = (a*d-b*c)/denom if denom > 0 else None
 
             if OR is None and PRR is None:
@@ -645,7 +648,7 @@ having count(distinct safetyreport_id) >= {min_reports}
 
             OR = (a / b) / (c / d) if b > 0 and d > 0 and c > 0 else None
             PRR = (a / (a + b)) / (c / (c + d)) if c > 0 else None
-            PHI = (a * d - b * c) / np.sqrt((a + b) * (c + d) * (b + d) * (a + c))
+            PHI = (a * d - b * c) / np.sqrt(float((a + b) * (c + d) * (b + d) * (a + c)))
 
             if OR is None and PRR is None:
                 continue
@@ -678,6 +681,7 @@ def drug_by_reaction_matrix(db, start_year, end_year, min_reports, save_to_file=
     JOIN safetyreport ON (safetyreport_id = safetyreport.id)
     JOIN reaction USING (safetyreport_id)
     WHERE LEFT(receivedate, 4)::int BETWEEN {start_year} AND {end_year}
+    and reactionmeddrapt is not null
     GROUP BY ingredient_concept_name, reactionmeddrapt
     HAVING COUNT(DISTINCT safetyreport_id) >= {min_reports};
     """
@@ -720,6 +724,7 @@ def drug_by_reaction_matrix(db, start_year, end_year, min_reports, save_to_file=
     FROM reaction
     JOIN safetyreport ON (safetyreport_id = safetyreport.id)
     WHERE LEFT(receivedate, 4)::int BETWEEN {start_year} AND {end_year}
+    and reactionmeddrapt is not null
     GROUP BY reactionmeddrapt
     HAVING COUNT(DISTINCT safetyreport_id) >= {min_reports};
     """
@@ -766,7 +771,7 @@ def drug_by_reaction_matrix(db, start_year, end_year, min_reports, save_to_file=
 
             OR = (a / b) / (c / d) if b > 0 and d > 0 and c > 0 else None
             PRR = (a / (a + b)) / (c / (c + d)) if c > 0 else None
-            PHI = (a * d - b * c) / np.sqrt((a + b) * (c + d) * (b + d) * (a + c))
+            PHI = (a * d - b * c) / np.sqrt(float((a + b) * (c + d) * (b + d) * (a + c)))
 
             if OR is None and PRR is None:
                 continue
@@ -884,7 +889,7 @@ where left(receivedate, 4)::int between {start_year} and {end_year};
 
             OR = (a / b) / (c / d) if b > 0 and d > 0 and c > 0 else None
             PRR = (a / (a + b)) / (c / (c + d)) if c > 0 else None
-            PHI = (a*d-b*c)/np.sqrt((a+b)*(c+d)*(b+d)*(a+c))
+            PHI = (a*d-b*c)/np.sqrt(float((a+b)*(c+d)*(b+d)*(a+c)))
 
             if OR is None and PRR is None:
                 continue
@@ -918,6 +923,7 @@ join safetyreport on (safetyreport_id = safetyreport.id)
 join reaction using (safetyreport_id)
 where left(receivedate, 4)::int between {start_year} and {end_year}
 and drugindication is not NULL
+and reactionmeddrapt is not NULL
 group by drugindication, reactionmeddrapt
 having count(distinct safetyreport_id) >= {min_reports};
 """
@@ -961,6 +967,7 @@ select reactionmeddrapt, count(distinct safetyreport_id)
 from reaction
 join safetyreport on (safetyreport_id = safetyreport.id)
 where left(receivedate, 4)::int between {start_year} and {end_year}
+and reactionmeddrapt is not null
 group by reactionmeddrapt
 having count(distinct safetyreport_id) >= {min_reports};
 """
@@ -1015,7 +1022,7 @@ where left(receivedate, 4)::int between {start_year} and {end_year};
 
             OR = (a / b) / (c / d) if b > 0 and d > 0 and c > 0 else None
             PRR = (a / (a + b)) / (c / (c + d)) if c > 0 else None
-            PHI = (a*d-b*c)/np.sqrt((a+b)*(c+d)*(b+d)*(a+c))
+            PHI = (a*d-b*c)/np.sqrt(float((a+b)*(c+d)*(b+d)*(a+c)))
 
             if OR is None and PRR is None:
                 continue
@@ -1034,13 +1041,21 @@ where left(receivedate, 4)::int between {start_year} and {end_year};
     
     return df
 
-# Example usage
+def parse_args():
+    parser = argparse.ArgumentParser(description="Process a range of years.")
+    parser.add_argument('--start_year', type=int, required=True, help='Start year (inclusive)')
+    parser.add_argument('--end_year', type=int, required=True, help='End year (inclusive)')
+    return parser.parse_args()
+
 if __name__ == "__main__":
     db = PostgresDB()
 
-    start_year = "2004"
-    end_year = start_year
-    min_reports = 10
+    args = parse_args()
+    print(f"Start Year: {args.start_year}")
+    print(f"End Year: {args.end_year}")
+    start_year = args.start_year
+    end_year = args.end_year
+    min_reports = 5
     
     ind_rea_df = indication_by_reaction_matrix(db, start_year, end_year, min_reports, save_to_file=True)
     ind_drug_df = indication_by_drug_matrix(db, start_year, end_year, min_reports, save_to_file=True)

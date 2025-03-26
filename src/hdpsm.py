@@ -7,6 +7,7 @@ import os
 import tqdm
 import time
 import shutil
+import argparse
 import numpy as np
 import pandas as pd
 from collections import defaultdict
@@ -20,6 +21,8 @@ from build_confounding_matrices import PostgresDB
 
 import pandas as pd
 import numpy as np
+
+MAX_SAMPLES = 50_000
 
 def stratified_1n_matching(df, propensity_col='propensity_score', treatment_col='treatment', 
                            n_bins=5, match_ratio=1, random_state=42):
@@ -71,12 +74,21 @@ def run_multiple_matchings(df, num_replicates=10, **match_kwargs):
         print("No matches found in any replicate.")
         return pd.DataFrame()
 
+def parse_args():
+    parser = argparse.ArgumentParser(description="Process a range of years.")
+    parser.add_argument('--start_year', type=int, required=True, help='Start year (inclusive)')
+    parser.add_argument('--end_year', type=int, required=True, help='End year (inclusive)')
+    return parser.parse_args()
+
 if __name__ == "__main__":
+    args = parse_args()
+    print(f"Start Year: {args.start_year}")
+    print(f"End Year: {args.end_year}")
 
     nreps = 10
     match_ratio = 5    
-    start_year = 2004
-    end_year = start_year
+    start_year = args.start_year
+    end_year = args.end_year
     compute_strategy = 'in_mem' # or could be 'in_db'
 
     # in_db on 2004-2004: 
@@ -232,13 +244,43 @@ if __name__ == "__main__":
         print(X.shape, X.sum(), X.sum()/(X.shape[0]*X.shape[1]))
         print(y.shape, y.sum())
 
+        n_samples = X.shape[0]
+        n_positives = int(y.sum())
+        n_negatives = n_samples - n_positives
+
+        if n_samples > MAX_SAMPLES:
+            print(f"Downsampling from {n_samples} to {MAX_SAMPLES}...")
+
+            pos_indices = np.where(y == 1)[0]
+            neg_indices = np.where(y == 0)[0]
+
+            # We want to keep as many positives as possible without flipping the class ratio
+            max_pos_to_keep = min(len(pos_indices), MAX_SAMPLES // 2)
+            n_pos_to_keep = min(len(pos_indices), max_pos_to_keep)
+            n_neg_to_keep = MAX_SAMPLES - n_pos_to_keep
+
+            # Randomly sample negatives
+            rng = np.random.default_rng(seed=42)
+            sampled_pos_indices = rng.choice(pos_indices, size=n_pos_to_keep, replace=False)
+            sampled_neg_indices = rng.choice(neg_indices, size=n_neg_to_keep, replace=False)
+
+            sampled_indices = np.concatenate([sampled_pos_indices, sampled_neg_indices])
+            rng.shuffle(sampled_indices)
+
+            X = X[sampled_indices]
+            y = y[sampled_indices]
+            sorted_reportids = np.array(sorted_reportids)[sampled_indices].tolist()
+
+            print(f"After downsampling: X.shape={X.shape}, positives={int(y.sum())}, negatives={X.shape[0] - int(y.sum())}")
+        
         if y.sum() < 5:
             # minimum number of reports for a given drug to run the analysis
             continue
 
         print('Training PSM model...')
-        clf = linear_model.LogisticRegression()
+        clf = linear_model.LogisticRegression(max_iter=1000)
         try:
+
             auroc = cross_val_score(clf, X, y, cv=5, scoring='roc_auc')
             print(f" AUROCs: {auroc}")
             clf.fit(X, y)

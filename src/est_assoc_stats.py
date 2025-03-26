@@ -11,6 +11,7 @@ import os
 import sys
 import gzip
 import tqdm
+import argparse
 import numpy as np
 import pandas as pd
 
@@ -20,10 +21,20 @@ from build_confounding_matrices import PostgresDB
 
 MIN_REPORTS = 5
 
+def parse_args():
+    parser = argparse.ArgumentParser(description="Process a range of years.")
+    parser.add_argument('--start_year', type=int, required=True, help='Start year (inclusive)')
+    parser.add_argument('--end_year', type=int, required=True, help='End year (inclusive)')
+    return parser.parse_args()
+
 if __name__ == "__main__":
 
-    start_year = 2004
-    end_year = start_year
+    args = parse_args()
+    print(f"Start Year: {args.start_year}")
+    print(f"End Year: {args.end_year}")
+
+    start_year = args.start_year
+    end_year = args.end_year
     results_dir = os.path.join('results', f"{start_year}-{end_year}")
 
     psm_files = [f for f in os.listdir(os.path.join(results_dir)) if f.startswith('hdpsm') and f.endswith('csv.gz')]
@@ -45,6 +56,22 @@ if __name__ == "__main__":
     psm = pd.read_csv(os.path.join(results_dir, psm_file))
     drugs = set(psm['drug'].unique())
     print("OK.")
+
+    drug_rea_fn = os.path.join('results', f'{start_year}-{end_year}', 'drug_reaction_associations.csv')
+    print(f"Loading original association estimates from file: {drug_rea_fn}", end=' ')
+    uncorrected_df = pd.read_csv(drug_rea_fn)
+    uncorrected_df.rename(columns={
+        'a': 'uncorrected_a',
+        'b': 'uncorrected_b',
+        'c': 'uncorrected_c',
+        'd': 'uncorrected_d',
+        'PRR': 'uncorrected_PRR',
+        'OR': 'uncorrected_OR',
+        'PHI': 'uncorrected_PHI'
+    }, inplace=True)
+    uncorrected_df['sex'] = 'All'
+    #print(uncorrected_df.head())
+    print('OK.')
 
     # load report -> reaction data
     db = PostgresDB()
@@ -117,6 +144,7 @@ if __name__ == "__main__":
                     assocs.append([drug, rea, sex, rep, a, b, c, d, OR, PRR, PHI])
 
     df = pd.DataFrame(assocs, columns=['drug', 'reaction', 'sex', 'replicate', 'a', 'b', 'c', 'd', 'OR', 'PRR', 'PHI'])
+    df = pd.merge(df, uncorrected_df, on=['drug', 'reaction', 'sex'], how='left')
 
     os.makedirs(f'./results/{start_year}-{end_year}', exist_ok=True)
     ofn = f'./results/{start_year}-{end_year}/{psm_file.split(".")[0]}_drug_reaction_associations.csv'
