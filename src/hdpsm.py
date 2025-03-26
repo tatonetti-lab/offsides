@@ -6,6 +6,7 @@ Run high-dimensional propensity score matching to control for confounding effect
 import os
 import tqdm
 import time
+import shutil
 import numpy as np
 import pandas as pd
 from collections import defaultdict
@@ -257,11 +258,13 @@ if __name__ == "__main__":
         drug_matched_df['auroc'] = np.mean(auroc)
 
         drug_matched_df.to_csv(os.path.join(results_dir, 'psm', f"{drugidx}_{drug}.csv.gz"))
-
+        
         if matched_df is None:
             matched_df = drug_matched_df
         else:
             matched_df = pd.concat([matched_df, drug_matched_df])
 
     matched_df.to_csv(os.path.join(results_dir, f'hdpsm_nrep{nreps}_mratio{match_ratio}.csv.gz'))
+    # clean up temporary individual files
+    shutil.rmtree(os.path.join(results_dir, 'psm'))
     db.close()

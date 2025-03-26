@@ -65,6 +65,19 @@ if __name__ == "__main__":
         reactions.add(rea)
     print("OK.")
 
+    print("Loading reported sex data...")
+    query = f"""
+    select patientsex, safetyreport.id
+    from safetyreport
+    where LEFT(receivedate, 4)::int BETWEEN {start_year} AND {end_year}
+    and patientsex is not null
+    and patientsex != '0'
+    """
+    results = db.execute_query(query)
+    sex2report = defaultdict(set)
+    for sex, reportid, in tqdm.tqdm(results):
+        sex2report[sex].add(reportid)
+
     assocs = list()
     
     for drug in tqdm.tqdm(drugs):
@@ -74,31 +87,36 @@ if __name__ == "__main__":
         
         for rep in replicates:
             
-            #print(f" Estimating associations statistics for {drug} replicate {rep+1} of {len(replicates)}.")
-            this_replicate = this_drug[this_drug['replicate']==rep]
-            treatment_reports = set(this_replicate[this_replicate['treatment']==1]['report_id'].unique())
-            control_reports = set(this_replicate[this_replicate['treatment']==0]['report_id'].unique())
+            for sex in ('All', '1', '2'):
+                #print(f" Estimating associations statistics for {drug} replicate {rep+1} of {len(replicates)}.")
+                this_replicate = this_drug[this_drug['replicate']==rep]
+                treatment_reports = set(this_replicate[this_replicate['treatment']==1]['report_id'].unique())
+                control_reports = set(this_replicate[this_replicate['treatment']==0]['report_id'].unique())
 
-            for rea in reactions:
-                a = len(reaction2report[rea] & treatment_reports)
-                if a < MIN_REPORTS:
-                    continue
-                
-                b = len(treatment_reports)-a
-                c = len(reaction2report[rea] & control_reports)
-                d = len(control_reports)-c
+                if sex != 'All':
+                    treatment_reports &= sex2report[sex]
+                    control_reports &= sex2report[sex]
 
-                try:
-                    OR = (a/b)/(c/d)
-                    PRR = (a/(a+b))/(c/(c+d))
-                    PHI = (a*d-b*c)/np.sqrt((a+b)*(c+d)*(b+d)*(a+c))
-                except ZeroDivisionError:
-                    #print(f"ERROR: ZeroDivisionError for {drug} and {rea}")
-                    continue
+                for rea in reactions:
+                    a = len(reaction2report[rea] & treatment_reports)
+                    if a < MIN_REPORTS:
+                        continue
+                    
+                    b = len(treatment_reports)-a
+                    c = len(reaction2report[rea] & control_reports)
+                    d = len(control_reports)-c
 
-                assocs.append([drug, rea, rep, a, b, c, d, OR, PRR, PHI])
+                    try:
+                        OR = (a/b)/(c/d)
+                        PRR = (a/(a+b))/(c/(c+d))
+                        PHI = (a*d-b*c)/np.sqrt((a+b)*(c+d)*(b+d)*(a+c))
+                    except ZeroDivisionError:
+                        #print(f"ERROR: ZeroDivisionError for {drug} and {rea}")
+                        continue
 
-    df = pd.DataFrame(assocs, columns=['drug', 'reaction', 'replicate', 'a', 'b', 'c', 'd', 'OR', 'PRR', 'PHI'])
+                    assocs.append([drug, rea, sex, rep, a, b, c, d, OR, PRR, PHI])
+
+    df = pd.DataFrame(assocs, columns=['drug', 'reaction', 'sex', 'replicate', 'a', 'b', 'c', 'd', 'OR', 'PRR', 'PHI'])
 
     os.makedirs(f'./results/{start_year}-{end_year}', exist_ok=True)
     ofn = f'./results/{start_year}-{end_year}/{psm_file.split(".")[0]}_drug_reaction_associations.csv'
