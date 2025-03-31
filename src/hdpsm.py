@@ -7,6 +7,7 @@ import os
 import tqdm
 import time
 import shutil
+import pickle
 import argparse
 import numpy as np
 import pandas as pd
@@ -78,12 +79,22 @@ def parse_args():
     parser = argparse.ArgumentParser(description="Process a range of years.")
     parser.add_argument('--start_year', type=int, required=True, help='Start year (inclusive)')
     parser.add_argument('--end_year', type=int, required=True, help='End year (inclusive)')
+    parser.add_argument('--part', type=int, required=False, help="Which part of the run to execute.")
+    parser.add_argument('--total_parts', type=int, required=False, help="Total parts in this run.")
     return parser.parse_args()
 
 if __name__ == "__main__":
     args = parse_args()
     print(f"Start Year: {args.start_year}")
     print(f"End Year: {args.end_year}")
+
+    if not args.part is None:
+        if args.total_parts is None:
+            raise Exception("ERROR: --part was set but --total_parts was not. --total_parts must also be set when using --part.")
+        if args.part > args.total_parts:
+            raise Exception(f"ERROR: Part provided, {args.part}, is greater than the total parts, {args.total_parts}")
+        if args.part < 1:
+            raise Exception(f"ERROR: Part provided, {args.part}, was less than 1. Value must be between 1 and --total_parts.")
 
     nreps = 10
     match_ratio = 5    
@@ -127,22 +138,32 @@ if __name__ == "__main__":
     drug2report = None
     ind2report = None 
     if compute_strategy == 'in_mem':
-        # load the drugs and indications data into local memory first
-        # may be prohbitively large for the system memory to handle for large year ranges
-        drug2report = defaultdict(set)
-        ind2report = defaultdict(set)
+        pkl_fp = os.path.join(results_dir, '_tmp_drug2report_ind2report.pkl')
+        if os.path.exists(pkl_fp,):
+            print("Found pickle file, will load report data from disk.")
+            with open(pkl_fp, 'rb') as fh:
+                drug2report, ind2report = pickle.load(fh)
+        else:
+            # load the drugs and indications data into local memory first
+            # may be prohbitively large for the system memory to handle for large year ranges
+            drug2report = defaultdict(set)
+            ind2report = defaultdict(set)
 
-        query = f"""
-        select ingredient_concept_name, drugindication, safetyreport_id
-        from drug
-        join ingredient on (ingredient.id = drug.id)
-        join safetyreport on (safetyreport.id = safetyreport_id)
-        where left(receivedate, 4)::int between {start_year} and {end_year}
-        """
-        results = db.execute_query(query)
-        for drug, ind, reportid in results:
-            drug2report[drug].add(reportid)
-            ind2report[ind].add(reportid)
+            query = f"""
+            select ingredient_concept_name, drugindication, safetyreport_id
+            from drug
+            join ingredient on (ingredient.id = drug.id)
+            join safetyreport on (safetyreport.id = safetyreport_id)
+            where left(receivedate, 4)::int between {start_year} and {end_year}
+            """
+            results = db.execute_query(query)
+            for drug, ind, reportid in results:
+                drug2report[drug].add(reportid)
+                ind2report[ind].add(reportid)
+            
+            with open(pkl_fp, 'wb') as fh:
+                pickle.dump((drug2report, ind2report), fh)
+            
     elif compute_strategy == 'in_db':
         pass
     else:
@@ -152,11 +173,21 @@ if __name__ == "__main__":
     os.makedirs(os.path.join(results_dir, 'psm'), exist_ok=True)
     logfh = open(f"logs/psm_{start_year}-{end_year}_{time.time()}.log", 'w')
 
+    if not args.part is None:
+        start_pos = int((float(args.part-1)/float(args.total_parts))*len(common_drugs))
+        stop_pos = int((float(args.part)/float(args.total_parts))*len(common_drugs))
+        print(f"Working on part {args.part} of {args.total_parts}. Will execute drugs in index range: ({start_pos}, {stop_pos}]")
+
     for drugidx, drug in tqdm.tqdm(enumerate(common_drugs), total=len(common_drugs)):
+
+        if not (args.part is None) and not (start_pos <= drugidx < stop_pos):
+            continue
         
         print(f"Working on propensity score matching for {drug} ({drugidx+1} of {len(common_drugs)})")
         if os.path.exists(os.path.join(results_dir, 'psm', f"{drugidx}_{drug}.csv.gz")):
             print(' > Found preexisting run. Will load from there.')
+            if not args.part is None:
+                continue
             drug_matched_df = pd.read_csv(os.path.join(results_dir, 'psm', f"{drugidx}_{drug}.csv.gz"))
             if matched_df is None:
                 matched_df = drug_matched_df
@@ -259,6 +290,12 @@ if __name__ == "__main__":
             n_pos_to_keep = min(len(pos_indices), max_pos_to_keep)
             n_neg_to_keep = MAX_SAMPLES - n_pos_to_keep
 
+            # Make sure we don't request more negatives than exist
+            n_neg_to_keep = min(MAX_SAMPLES - n_pos_to_keep, len(neg_indices))
+
+            # Adjust positive count again just in case (rare edge case)
+            n_pos_to_keep = min(len(pos_indices), MAX_SAMPLES - n_neg_to_keep)
+
             # Randomly sample negatives
             rng = np.random.default_rng(seed=42)
             sampled_pos_indices = rng.choice(pos_indices, size=n_pos_to_keep, replace=False)
@@ -299,14 +336,17 @@ if __name__ == "__main__":
         drug_matched_df['drug'] = drug
         drug_matched_df['auroc'] = np.mean(auroc)
 
-        drug_matched_df.to_csv(os.path.join(results_dir, 'psm', f"{drugidx}_{drug}.csv.gz"))
+        drug_matched_df.to_csv(os.path.join(results_dir, 'psm', f"{drugidx}_{drug}.csv.gz"), index=False)
         
-        if matched_df is None:
-            matched_df = drug_matched_df
-        else:
-            matched_df = pd.concat([matched_df, drug_matched_df])
+        if args.part is None:
+            if matched_df is None:
+                matched_df = drug_matched_df
+            else:
+                matched_df = pd.concat([matched_df, drug_matched_df], ignore_index=True)
 
-    matched_df.to_csv(os.path.join(results_dir, f'hdpsm_nrep{nreps}_mratio{match_ratio}.csv.gz'))
-    # clean up temporary individual files
-    shutil.rmtree(os.path.join(results_dir, 'psm'))
+    if args.part is None:
+        matched_df.to_csv(os.path.join(results_dir, f'hdpsm_nrep{nreps}_mratio{match_ratio}_maxsamp{MAX_SAMPLES}.csv.gz'), index=False)
+        # clean up temporary individual files
+        # shutil.rmtree(os.path.join(results_dir, 'psm'))
+    
     db.close()

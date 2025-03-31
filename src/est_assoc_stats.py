@@ -70,6 +70,7 @@ if __name__ == "__main__":
         'PHI': 'uncorrected_PHI'
     }, inplace=True)
     uncorrected_df['sex'] = 'All'
+    uncorrected_df.rename(columns={'sex': 'patient_sex'}, inplace=True)
     #print(uncorrected_df.head())
     print('OK.')
 
@@ -143,9 +144,9 @@ if __name__ == "__main__":
 
                     assocs.append([drug, rea, sex, rep, a, b, c, d, OR, PRR, PHI])
 
-    df = pd.DataFrame(assocs, columns=['drug', 'reaction', 'sex', 'replicate', 'a', 'b', 'c', 'd', 'OR', 'PRR', 'PHI'])
-    df = pd.merge(df, uncorrected_df, on=['drug', 'reaction', 'sex'], how='left')
-
+    df = pd.DataFrame(assocs, columns=['drug', 'reaction', 'patient_sex', 'replicate', 'a', 'b', 'c', 'd', 'OR', 'PRR', 'PHI'])
+    df = pd.merge(df, uncorrected_df, on=['drug', 'reaction', 'patient_sex'], how='left')
+    
     os.makedirs(f'./results/{start_year}-{end_year}', exist_ok=True)
     ofn = f'./results/{start_year}-{end_year}/{psm_file.split(".")[0]}_drug_reaction_associations.csv'
     print(f"Saving results to file: {ofn}")
