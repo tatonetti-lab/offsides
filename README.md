@@ -19,7 +19,7 @@ The process of creating the OffSIDES resource is broken down into the following 
 
 ### Evaluation
 5. Identify and build confounded reference set
- - run notebook named `biased_by_confounders.ipynb`
+ - run `python3 src/build_confounded_datasets.py --start_year 2004 --end_year 2004`
 6. Evaluate on reference sets:
  - run notebook named `evaluate_performance_confounding.ipynb`
  - run notebook named `evaluate_performance_onsides.ipynb`

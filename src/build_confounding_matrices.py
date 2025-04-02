@@ -122,6 +122,7 @@ select ingredient_concept_name, count(distinct safetyreport_id)
 from drug
 join ingredient on (ingredient.id = drug.id)
 join safetyreport on (safetyreport_id = safetyreport.id)
+join drug_indications using (drugindication)
 where left(receivedate, 4)::int between {start_year} and {end_year}
 and drugindication is not NULL
 and patientsex is not NULL
@@ -496,6 +497,7 @@ select ingredient_concept_name, count(distinct safetyreport_id)
 from drug
 join ingredient on (ingredient.id = drug.id)
 join safetyreport on (safetyreport_id = safetyreport.id)
+join drug_indications using (drugindication)
 where left(receivedate, 4)::int between {start_year} and {end_year}
 and drugindication is not NULL
 and patientsex is not NULL
@@ -797,13 +799,14 @@ def indication_by_drug_matrix(db, start_year, end_year, min_reports, save_to_fil
     print('Querying for indication, drug counts...')
     inddrug_count = defaultdict(int)
     query = f"""
-select drugindication, ingredient_concept_name, count(distinct safetyreport_id)
+select snomed_term, ingredient_concept_name, count(distinct safetyreport_id)
 from drug
 join ingredient on (ingredient.id = drug.id)
 join safetyreport on (safetyreport_id = safetyreport.id)
+join drug_indications using (drugindication)
 where left(receivedate, 4)::int between {start_year} and {end_year}
 and drugindication is not NULL
-group by drugindication, ingredient_concept_name
+group by snomed_term, ingredient_concept_name
 """
     try:
         results = db.execute_query(query)
@@ -818,13 +821,14 @@ group by drugindication, ingredient_concept_name
     print('Querying for indication counts...')
     ind_count = defaultdict(int)
     query = f"""
-select drugindication, count(distinct safetyreport_id)
+select snomed_term, count(distinct safetyreport_id)
 from drug
 join ingredient on (ingredient.id = drug.id)
 join safetyreport on (safetyreport_id = safetyreport.id)
+join drug_indications using (drugindication)
 where left(receivedate, 4)::int between {start_year} and {end_year}
 and drugindication is not NULL
-group by drugindication
+group by snomed_term
 """
     try:
         results = db.execute_query(query)
@@ -842,6 +846,7 @@ select ingredient_concept_name, count(distinct safetyreport_id)
 from drug
 join ingredient on (ingredient.id = drug.id)
 join safetyreport on (safetyreport_id = safetyreport.id)
+join drug_indications using (drugindication)
 where left(receivedate, 4)::int between {start_year} and {end_year}
 and drugindication is not NULL
 group by ingredient_concept_name
@@ -917,14 +922,15 @@ def indication_by_reaction_matrix(db, start_year, end_year, min_reports, save_to
     print('Querying for indication, reaction counts...')
     indrea_count = defaultdict(int)
     query = f"""
-select drugindication, reactionmeddrapt, count(distinct safetyreport_id)
+select snomed_term, reactionmeddrapt, count(distinct safetyreport_id)
 from drug
 join safetyreport on (safetyreport_id = safetyreport.id)
 join reaction using (safetyreport_id)
+join drug_indications using (drugindication)
 where left(receivedate, 4)::int between {start_year} and {end_year}
 and drugindication is not NULL
 and reactionmeddrapt is not NULL
-group by drugindication, reactionmeddrapt
+group by snomed_term, reactionmeddrapt
 having count(distinct safetyreport_id) >= {min_reports};
 """
     try:
@@ -942,12 +948,13 @@ having count(distinct safetyreport_id) >= {min_reports};
     print('Querying for indication counts...')
     ind_count = defaultdict(int)
     query = f"""
-select drugindication, count(distinct safetyreport_id)
+select snomed_term, count(distinct safetyreport_id)
 from drug
 join safetyreport on (safetyreport_id = safetyreport.id)
+join drug_indications using (drugindication)
 where left(receivedate, 4)::int between {start_year} and {end_year}
 and drugindication is not NULL
-group by drugindication
+group by snomed_term
 having count(distinct safetyreport_id) >= {min_reports};
 """
     try:

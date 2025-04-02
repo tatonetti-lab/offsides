@@ -150,10 +150,11 @@ if __name__ == "__main__":
             ind2report = defaultdict(set)
 
             query = f"""
-            select ingredient_concept_name, drugindication, safetyreport_id
+            select ingredient_concept_name, snomed_term, safetyreport_id
             from drug
             join ingredient on (ingredient.id = drug.id)
             join safetyreport on (safetyreport.id = safetyreport_id)
+            join drug_indications using (drugindication)
             where left(receivedate, 4)::int between {start_year} and {end_year}
             """
             results = db.execute_query(query)
@@ -221,12 +222,13 @@ if __name__ == "__main__":
         if ind2report is None:
             escaped_corr_inds = [s.replace("'", "''") for s in corr_inds]
             query = f"""
-            select drugindication, safetyreport_id
+            select snomed_term, safetyreport_id
             from drug
             join ingredient on (ingredient.id = drug.id)
             join safetyreport on (safetyreport.id = safetyreport_id)
+            join drug_indications using (drugindication)
             where left(receivedate, 4)::int between {start_year} and {end_year}
-            and drugindication in ('{"', '".join(escaped_corr_inds)}');
+            and snomed_term in ('{"', '".join(escaped_corr_inds)}');
             """
             result = db.execute_query(query)
             for indication, reportid in result:
