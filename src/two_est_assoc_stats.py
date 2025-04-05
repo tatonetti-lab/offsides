@@ -19,7 +19,7 @@ from collections import defaultdict
 
 from build_confounding_matrices import PostgresDB
 
-MIN_REPORTS = 5
+MIN_REPORTS = 3
 
 def parse_args():
     parser = argparse.ArgumentParser(description="Process a range of years.")
@@ -37,7 +37,7 @@ if __name__ == "__main__":
     end_year = args.end_year
     results_dir = os.path.join('results', f"{start_year}-{end_year}")
 
-    psm_files = [f for f in os.listdir(os.path.join(results_dir)) if f.startswith('hdpsm') and f.endswith('csv.gz')]
+    psm_files = [f for f in os.listdir(os.path.join(results_dir)) if f.startswith('two_hdpsm') and f.endswith('csv.gz')]
 
     if len(psm_files) == 0:
         raise Exception(f"Did not find the propensity score matching files at {results_dir}. Was hdpsm.py run?")
@@ -54,25 +54,8 @@ if __name__ == "__main__":
     psm_file = psm_files[choice]
     print(f"Loading PSM data from file: {psm_file}...", end=' ')
     psm = pd.read_csv(os.path.join(results_dir, psm_file))
-    drugs = set(psm['drug'].unique())
-    print("OK.")
-
-    drug_rea_fn = os.path.join('results', f'{start_year}-{end_year}', 'drug_reaction_associations.csv')
-    print(f"Loading original association estimates from file: {drug_rea_fn}", end=' ')
-    uncorrected_df = pd.read_csv(drug_rea_fn)
-    uncorrected_df.rename(columns={
-        'a': 'uncorrected_a',
-        'b': 'uncorrected_b',
-        'c': 'uncorrected_c',
-        'd': 'uncorrected_d',
-        'PRR': 'uncorrected_PRR',
-        'OR': 'uncorrected_OR',
-        'PHI': 'uncorrected_PHI'
-    }, inplace=True)
-    uncorrected_df['sex'] = 'All'
-    uncorrected_df.rename(columns={'sex': 'patient_sex'}, inplace=True)
-    #print(uncorrected_df.head())
-    print('OK.')
+    unique_pairs = psm[['drug1', 'drug2']].drop_duplicates()
+    print(f"OK. Found {len(unique_pairs)} unique pairs of drugs.")
 
     # load report -> reaction data
     db = PostgresDB()
@@ -107,17 +90,16 @@ if __name__ == "__main__":
         sex2report[sex].add(reportid)
 
     assocs = list()
-    
-    for drug in tqdm.tqdm(drugs):
-        this_drug = psm[psm['drug']==drug]
-        replicates = this_drug['replicate'].unique()
-        #print(f"Found {len(replicates)} replicates of the PSM matching for {drug}")
-        
+
+    for drug1, drug2 in tqdm.tqdm(unique_pairs.itertuples(index=False, name=None), total=len(unique_pairs)):
+    # for drug1, drug2 in unique_pairs.itertuples(index=False, name=None):
+        #print(drug1, drug2)
+        this_pair = psm[(psm['drug1']==drug1)&(psm['drug2']==drug2)]
+        replicates = this_pair['replicate'].unique()
+
         for rep in replicates:
-            
             for sex in ('All', '1', '2'):
-                #print(f" Estimating associations statistics for {drug} replicate {rep+1} of {len(replicates)}.")
-                this_replicate = this_drug[this_drug['replicate']==rep]
+                this_replicate = this_pair[this_pair['replicate']==rep]
                 treatment_reports = set(this_replicate[this_replicate['treatment']==1]['report_id'].unique())
                 control_reports = set(this_replicate[this_replicate['treatment']==0]['report_id'].unique())
 
@@ -139,20 +121,12 @@ if __name__ == "__main__":
                         PRR = (a/(a+b))/(c/(c+d))
                         PHI = (a*d-b*c)/np.sqrt((a+b)*(c+d)*(b+d)*(a+c))
                     except ZeroDivisionError:
-                        #print(f"ERROR: ZeroDivisionError for {drug} and {rea}")
+                        # print(f"ERROR: ZeroDivisionError for {drug1}, {drug2} and {rea}")
                         continue
 
-                    assocs.append([drug, rea, sex, rep, a, b, c, d, OR, PRR, PHI])
-
-    df = pd.DataFrame(assocs, columns=['drug', 'reaction', 'patient_sex', 'replicate', 'a', 'b', 'c', 'd', 'OR', 'PRR', 'PHI'])
-    df = pd.merge(df, uncorrected_df, on=['drug', 'reaction', 'patient_sex'], how='left')
+                    assocs.append([drug1, drug2, rea, sex, rep, a, b, c, d, OR, PRR, PHI])
     
-    os.makedirs(f'./results/{start_year}-{end_year}', exist_ok=True)
-    ofn = f'./results/{start_year}-{end_year}/{psm_file.split(".")[0]}_drug_reaction_associations.csv'
+    df = pd.DataFrame(assocs, columns=['drug1', 'drug2', 'reaction', 'patient_sex', 'replicate', 'a', 'b', 'c', 'd', 'OR', 'PRR', 'PHI'])
+    ofn = f'./results/{start_year}-{end_year}/{psm_file.split(".")[0]}_pair_reaction_associations.csv'
     print(f"Saving results to file: {ofn}")
     df.to_csv(ofn, index=False)
-
-
-
-
-

@@ -201,7 +201,7 @@ if __name__ == "__main__":
         corr_inds = set(ind_drug_df[(ind_drug_df['drug'] == drug) & (ind_drug_df['PHI'] > 0)]['indication'].unique())
         corr_drugs = set(drug_drug_df[(drug_drug_df['drug'] == drug) & (drug_drug_df['PHI'] > 0)]['conf_drug'].unique())
         # print(corr_inds)
-
+        
         if drug2report is None:
             query = f"""
             select safetyreport_id

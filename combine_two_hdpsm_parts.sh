@@ -2,11 +2,11 @@
 
 # Parameters
 START_YEAR=2004
-END_YEAR=2024
+END_YEAR=2004
 
 # Paths
-INPUT_DIR="results/${START_YEAR}-${END_YEAR}/psm"
-OUTPUT_FILE="results/${START_YEAR}-${END_YEAR}/hdpsm_nrep10_mratio5_maxsamp50000_drug_reaction_associations.csv.gz"
+INPUT_DIR="results/${START_YEAR}-${END_YEAR}/twopsm"
+OUTPUT_FILE="results/${START_YEAR}-${END_YEAR}/two_hdpsm_nrep10_mratio5_maxsamp10000.csv.gz"
 
 # Find all csv.gz files in the input directory
 FILES=("$INPUT_DIR"/*.csv.gz)
