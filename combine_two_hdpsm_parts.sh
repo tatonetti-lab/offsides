@@ -2,7 +2,7 @@
 
 # Parameters
 START_YEAR=2004
-END_YEAR=2004
+END_YEAR=2024
 
 # Paths
 INPUT_DIR="results/${START_YEAR}-${END_YEAR}/twopsm"

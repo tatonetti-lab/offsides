@@ -24,6 +24,7 @@ import pandas as pd
 import numpy as np
 
 MAX_SAMPLES = 10_000
+MIN_REPORTS = 5
 
 def stratified_1n_matching(df, propensity_col='propensity_score', treatment_col='treatment', 
                            n_bins=5, match_ratio=1, random_state=42):
@@ -179,12 +180,20 @@ if __name__ == "__main__":
         stop_pos = int((float(args.part)/float(args.total_parts))*len(common_drugs))
         print(f"Working on part {args.part} of {args.total_parts}. Will execute drugs in index range: ({start_pos}, {stop_pos}]")
 
+    print("Preprocessing the data to speed up analysis later...")
+    drug2corrinds = defaultdict(set)
+    drug2corrdrugs = defaultdict(set)
+    for _, drug in tqdm.tqdm(enumerate(common_drugs), total=len(common_drugs)):
+        drug2corrinds[drug] = set(ind_drug_df[(ind_drug_df['drug'] == drug) & (ind_drug_df['PHI'] > 0)]['indication'].unique())
+        drug2corrdrugs[drug] = set(drug_drug_df[(drug_drug_df['drug'] == drug) & (drug_drug_df['PHI'] > 0)]['conf_drug'].unique())
+
     for drug1idx, drug1 in tqdm.tqdm(enumerate(common_drugs), total=len(common_drugs)):
+    # for drug1idx, drug1 in enumerate(common_drugs):
         
         if not (args.part is None) and not (start_pos <= drug1idx < stop_pos):
             continue
         
-        #print(f"Working on propensity score matching for pairs including {drug1} ({drug1idx+1} of {len(common_drugs)})")
+        # print(f"Working on propensity score matching for pairs including {drug1} ({drug1idx+1} of {len(common_drugs)})")
         
         # for idx, drug2 in tqdm.tqdm(enumerate(common_drugs[(drug1idx+1):]), total=len(common_drugs[(drug1idx+1):])):
         for idx, drug2 in enumerate(common_drugs[(drug1idx+1):]):
@@ -194,13 +203,11 @@ if __name__ == "__main__":
             if drug2idx < drug1idx:
                 continue
             
-            # if drug1 != 'albumin human, USP' or drug2 != 'docetaxel':
+            # if drug1 != '17-alpha-hydroxyprogesterone' or drug2 != 'bupropion':
             #     continue
             
-            # print(drug1, drug2)
-
             if os.path.exists(os.path.join(results_dir, 'twopsm', f"{drug1idx}_{drug1}_{drug2idx}_{drug2}.csv.gz")):
-                #print(' > Found preexisting run. Will load from there.')
+                # print(' > Found preexisting run. Will load from there.')
                 if not args.part is None:
                     continue
                 drug_matched_df = pd.read_csv(os.path.join(results_dir, 'twopsm', f"{drug1idx}_{drug1}_{drug2idx}_{drug2}.csv.gz"))
@@ -212,12 +219,18 @@ if __name__ == "__main__":
             
             # print(ind_drug_df.shape)
             # print(ind_drug_df[(ind_drug_df['drug'] == drug1) & (ind_drug_df['PHI'] > 0)].shape)
-            corr_inds_1 = set(ind_drug_df[(ind_drug_df['drug'] == drug1) & (ind_drug_df['PHI'] > 0)]['indication'].unique())
-            corr_drugs_1 = set(drug_drug_df[(drug_drug_df['drug'] == drug1) & (drug_drug_df['PHI'] > 0)]['conf_drug'].unique())
+            # corr_inds_1 = set(ind_drug_df[(ind_drug_df['drug'] == drug1) & (ind_drug_df['PHI'] > 0)]['indication'].unique())
+            # corr_drugs_1 = set(drug_drug_df[(drug_drug_df['drug'] == drug1) & (drug_drug_df['PHI'] > 0)]['conf_drug'].unique())
 
-            corr_inds_2 = set(ind_drug_df[(ind_drug_df['drug'] == drug2) & (ind_drug_df['PHI'] > 0)]['indication'].unique())
-            corr_drugs_2 = set(drug_drug_df[(drug_drug_df['drug'] == drug2) & (drug_drug_df['PHI'] > 0)]['conf_drug'].unique())
+            # corr_inds_2 = set(ind_drug_df[(ind_drug_df['drug'] == drug2) & (ind_drug_df['PHI'] > 0)]['indication'].unique())
+            # corr_drugs_2 = set(drug_drug_df[(drug_drug_df['drug'] == drug2) & (drug_drug_df['PHI'] > 0)]['conf_drug'].unique())
             
+            corr_inds_1 = drug2corrinds[drug1]
+            corr_inds_2 = drug2corrinds[drug2]
+
+            corr_drugs_1 = drug2corrdrugs[drug1]
+            corr_drugs_2 = drug2corrdrugs[drug2]
+
             corr_inds = corr_inds_1 | corr_inds_2
             corr_drugs = corr_drugs_1 | corr_drugs_2
             # print(corr_inds)
@@ -229,12 +242,11 @@ if __name__ == "__main__":
                 drug2_report_ids = drug2report[drug2]
                 pair_report_ids = drug1_report_ids & drug2_report_ids
             
+            # print(drug1, drug2)
             # print(f"Number of pair reports: {len(pair_report_ids)}")
             
-            if len(pair_report_ids) == 0:
+            if len(pair_report_ids) < MIN_REPORTS:
                 continue
-            
-            
 
             corr_inds_reports = defaultdict(set)
             if ind2report is None:
@@ -270,15 +282,15 @@ if __name__ == "__main__":
                 if reportid in pair_report_ids:
                     y[i] = 1
             
-            #print(X.shape, X.sum(), X.sum()/(X.shape[0]*X.shape[1]))
-            #print(y.shape, y.sum())
+            # print(X.shape, X.sum(), X.sum()/(X.shape[0]*X.shape[1]))
+            # print(y.shape, y.sum())
 
             n_samples = X.shape[0]
             n_positives = int(y.sum())
             n_negatives = n_samples - n_positives
 
             if n_samples > MAX_SAMPLES:
-                #print(f"Downsampling from {n_samples} to {MAX_SAMPLES}...")
+                # print(f"Downsampling from {n_samples} to {MAX_SAMPLES}...")
 
                 pos_indices = np.where(y == 1)[0]
                 neg_indices = np.where(y == 0)[0]
@@ -306,17 +318,17 @@ if __name__ == "__main__":
                 y = y[sampled_indices]
                 sorted_reportids = np.array(sorted_reportids)[sampled_indices].tolist()
 
-                #print(f"After downsampling: X.shape={X.shape}, positives={int(y.sum())}, negatives={X.shape[0] - int(y.sum())}")
+                # print(f"After downsampling: X.shape={X.shape}, positives={int(y.sum())}, negatives={X.shape[0] - int(y.sum())}")
             
-            if y.sum() < 5:
+            if y.sum() < MIN_REPORTS:
                 # minimum number of reports for a given drug to run the analysis
                 continue
 
-            #print('Training PSM model...')
+            # print('Training PSM model...')
             clf = linear_model.LogisticRegression(max_iter=1000)
             try:
                 auroc = cross_val_score(clf, X, y, cv=5, scoring='roc_auc')
-                #print(f" AUROCs: {auroc}")
+                # print(f" AUROCs: {auroc}")
                 clf.fit(X, y)
                 probas = clf.predict_proba(X)[:,1]
             except Exception as e:

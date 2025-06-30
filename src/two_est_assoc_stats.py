@@ -13,7 +13,8 @@ import gzip
 import tqdm
 import argparse
 import numpy as np
-import pandas as pd
+# import pandas as pd
+import polars as pl
 
 from collections import defaultdict
 
@@ -53,8 +54,12 @@ if __name__ == "__main__":
     
     psm_file = psm_files[choice]
     print(f"Loading PSM data from file: {psm_file}...", end=' ')
-    psm = pd.read_csv(os.path.join(results_dir, psm_file))
-    unique_pairs = psm[['drug1', 'drug2']].drop_duplicates()
+    psm = pl.read_csv(os.path.join(results_dir, psm_file))
+    # pandas:
+    # unique_pairs = psm[['drug1', 'drug2']].drop_duplicates()
+    # polars:
+    unique_pairs = psm.select(['drug1', 'drug2']).unique()
+
     print(f"OK. Found {len(unique_pairs)} unique pairs of drugs.")
 
     # load report -> reaction data
@@ -91,18 +96,51 @@ if __name__ == "__main__":
 
     assocs = list()
 
-    for drug1, drug2 in tqdm.tqdm(unique_pairs.itertuples(index=False, name=None), total=len(unique_pairs)):
-    # for drug1, drug2 in unique_pairs.itertuples(index=False, name=None):
+    # pandas:
+    # for drug1, drug2 in tqdm.tqdm(unique_pairs.itertuples(index=False, name=None), total=len(unique_pairs)):
+    # polars:
+    for drug1, drug2 in tqdm.tqdm(unique_pairs.iter_rows(named=False), total=len(unique_pairs)):
         #print(drug1, drug2)
-        this_pair = psm[(psm['drug1']==drug1)&(psm['drug2']==drug2)]
-        replicates = this_pair['replicate'].unique()
+        # pandas:
+        # this_pair = psm[(psm['drug1']==drug1)&(psm['drug2']==drug2)]
+        # polars:
+        this_pair = psm.filter((pl.col('drug1') == drug1) & (pl.col('drug2') == drug2))
+        
+        # pandas:
+        # replicates = this_pair['replicate'].unique()
+        # polars:
+        replicates = this_pair.select('replicate').unique().to_series().to_list()
 
         for rep in replicates:
             for sex in ('All', '1', '2'):
-                this_replicate = this_pair[this_pair['replicate']==rep]
-                treatment_reports = set(this_replicate[this_replicate['treatment']==1]['report_id'].unique())
-                control_reports = set(this_replicate[this_replicate['treatment']==0]['report_id'].unique())
+                # pandas:
+                # this_replicate = this_pair[this_pair['replicate']==rep]
+                # polars:
+                this_replicate = this_pair.filter(pl.col('replicate') == rep)
 
+                # pandas:
+                # treatment_reports = set(this_replicate[this_replicate['treatment']==1]['report_id'].unique())
+                # polars:
+                treatment_reports = set(
+                    this_replicate
+                    .filter(pl.col('treatment') == 1)
+                    .select('report_id')
+                    .unique()
+                    .to_series()
+                    .to_list()
+                )
+
+                # pandas:
+                # control_reports = set(this_replicate[this_replicate['treatment']==0]['report_id'].unique())
+                # polars:
+                control_reports = set(
+                    this_replicate
+                    .filter(pl.col('treatment') == 0)
+                    .select('report_id')
+                    .unique()
+                    .to_series()
+                    .to_list()
+                )
                 if sex != 'All':
                     treatment_reports &= sex2report[sex]
                     control_reports &= sex2report[sex]
@@ -125,8 +163,15 @@ if __name__ == "__main__":
                         continue
 
                     assocs.append([drug1, drug2, rea, sex, rep, a, b, c, d, OR, PRR, PHI])
-    
-    df = pd.DataFrame(assocs, columns=['drug1', 'drug2', 'reaction', 'patient_sex', 'replicate', 'a', 'b', 'c', 'd', 'OR', 'PRR', 'PHI'])
+    # pandas:
+    # df = pd.DataFrame(assocs, columns=['drug1', 'drug2', 'reaction', 'patient_sex', 'replicate', 'a', 'b', 'c', 'd', 'OR', 'PRR', 'PHI'])
+    # polars:
+    df = pl.DataFrame(assocs, schema=['drug1', 'drug2', 'reaction', 'patient_sex', 'replicate', 'a', 'b', 'c', 'd', 'OR', 'PRR', 'PHI'])
+
     ofn = f'./results/{start_year}-{end_year}/{psm_file.split(".")[0]}_pair_reaction_associations.csv'
     print(f"Saving results to file: {ofn}")
-    df.to_csv(ofn, index=False)
+    
+    # pandas:
+    # df.to_csv(ofn, index=False)
+    # polars:
+    df.write_csv(ofn)
