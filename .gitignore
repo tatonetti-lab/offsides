@@ -1,6 +1,7 @@
 # offsides project
 data
 data/
+openfda_downloads/
 .DS_Store
 *git_ignore*
 onsides-2.0.0
@@ -9,6 +10,7 @@ data.zip
 config.json
 results/
 logs/
+pgpass.tmp
 
 # Byte-compiled / optimized / DLL files
 __pycache__/

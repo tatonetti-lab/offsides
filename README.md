@@ -30,6 +30,14 @@ The process of creating the OffSIDES resource is broken down into the following 
 ## Optional Files
 - Map from drug indication to snomed
 
+## OpenFDA Schema Loader
 
+The `src/load_openfda.py` script normalizes the OpenFDA FAERS downloads (`openfda_downloads/files/...`) into a Postgres schema. To rebuild the schema and load data, run:
 
+```bash
+python3 src/load_openfda.py --schema openfda --drop-schema
+```
 
+The loader reads connection details from `config.json`. Use `--limit-files` for smoke tests and `--batch-size` to tune buffering. The refactored importer relies on database constraints for de-duplication, so reruns should start from an empty schema (pass `--drop-schema`).
+
+The loader populates `openfda.drug2rxcui` by exploding the RxCUI array embedded in each drug record, making it easy to derive ingredient links with OMOP vocabularies.
