@@ -12,6 +12,7 @@ import sys
 import gzip
 import tqdm
 import argparse
+import hashlib
 import numpy as np
 import pandas as pd
 
@@ -20,6 +21,17 @@ from collections import defaultdict
 from build_confounding_matrices import PostgresDB
 
 MIN_REPORTS = 5
+
+
+def _normalize(value):
+    return value.strip() if isinstance(value, str) else value
+
+
+def _reaction_id(value: str) -> str:
+    normalized = _normalize(value)
+    if not normalized:
+        return None
+    return hashlib.sha1(normalized.upper().encode('utf-8')).hexdigest()[:16]
 
 def parse_args():
     parser = argparse.ArgumentParser(description="Process a range of years.")
@@ -54,12 +66,31 @@ if __name__ == "__main__":
     psm_file = psm_files[choice]
     print(f"Loading PSM data from file: {psm_file}...", end=' ')
     psm = pd.read_csv(os.path.join(results_dir, psm_file))
-    drugs = set(psm['drug'].unique())
+    if 'drug_id' not in psm.columns:
+        psm['drug_id'] = psm['drug'].apply(_normalize)
+    if 'drug_name' not in psm.columns:
+        psm['drug_name'] = psm.get('drug', psm['drug_id'])
+    drugs = set(psm['drug_id'].unique())
+    drug_name_map = (
+        psm[['drug_id', 'drug_name']]
+        .drop_duplicates()
+        .set_index('drug_id')['drug_name']
+        .to_dict()
+    )
     print("OK.")
 
     drug_rea_fn = os.path.join('results', f'{start_year}-{end_year}', 'drug_reaction_associations.csv')
     print(f"Loading original association estimates from file: {drug_rea_fn}", end=' ')
     uncorrected_df = pd.read_csv(drug_rea_fn)
+    if 'drug_id' not in uncorrected_df.columns:
+        uncorrected_df['drug_id'] = uncorrected_df['drug'].apply(_normalize)
+    if 'drug_name' not in uncorrected_df.columns:
+        uncorrected_df['drug_name'] = uncorrected_df.get('drug', uncorrected_df['drug_id'])
+    if 'reaction_id' not in uncorrected_df.columns:
+        uncorrected_df['reaction_id'] = uncorrected_df['reaction'].apply(_reaction_id)
+    if 'reaction_name' not in uncorrected_df.columns:
+        uncorrected_df['reaction_name'] = uncorrected_df.get('reaction', uncorrected_df['reaction_id'])
+
     uncorrected_df.rename(columns={
         'a': 'uncorrected_a',
         'b': 'uncorrected_b',
@@ -69,8 +100,24 @@ if __name__ == "__main__":
         'OR': 'uncorrected_OR',
         'PHI': 'uncorrected_PHI'
     }, inplace=True)
-    uncorrected_df['sex'] = 'All'
-    uncorrected_df.rename(columns={'sex': 'patient_sex'}, inplace=True)
+    if 'patient_sex' not in uncorrected_df.columns:
+        uncorrected_df['patient_sex'] = 'All'
+    expected_cols = [
+        'drug_id',
+        'drug_name',
+        'reaction_id',
+        'reaction_name',
+        'patient_sex',
+        'uncorrected_a',
+        'uncorrected_b',
+        'uncorrected_c',
+        'uncorrected_d',
+        'uncorrected_PRR',
+        'uncorrected_OR',
+        'uncorrected_PHI',
+    ]
+    available_cols = [col for col in expected_cols if col in uncorrected_df.columns]
+    uncorrected_df = uncorrected_df[available_cols]
     #print(uncorrected_df.head())
     print('OK.')
 
@@ -86,11 +133,16 @@ if __name__ == "__main__":
     results = db.execute_query(query)
     report2reaction = defaultdict(set)
     reaction2report = defaultdict(set)
+    reaction_name_map = {}
     reactions = set()
     for rea, reportid in tqdm.tqdm(results):
-        report2reaction[reportid].add(rea)
-        reaction2report[rea].add(reportid)
-        reactions.add(rea)
+        reaction_id = _reaction_id(rea)
+        if reaction_id is None:
+            continue
+        report2reaction[reportid].add(reaction_id)
+        reaction2report[reaction_id].add(reportid)
+        reactions.add(reaction_id)
+        reaction_name_map.setdefault(reaction_id, rea)
     print("OK.")
 
     print("Loading reported sex data...")
@@ -107,9 +159,12 @@ if __name__ == "__main__":
         sex2report[sex].add(reportid)
 
     assocs = list()
+
+    drug_col = 'drug_id'
     
     for drug in tqdm.tqdm(drugs):
-        this_drug = psm[psm['drug']==drug]
+        drug_name = drug_name_map.get(drug, drug)
+        this_drug = psm[psm[drug_col] == drug]
         replicates = this_drug['replicate'].unique()
         #print(f"Found {len(replicates)} replicates of the PSM matching for {drug}")
         
@@ -142,17 +197,26 @@ if __name__ == "__main__":
                         #print(f"ERROR: ZeroDivisionError for {drug} and {rea}")
                         continue
 
-                    assocs.append([drug, rea, sex, rep, a, b, c, d, OR, PRR, PHI])
+                    assocs.append([
+                        drug,
+                        drug_name,
+                        rea,
+                        reaction_name_map.get(rea, rea),
+                        sex,
+                        rep,
+                        a,
+                        b,
+                        c,
+                        d,
+                        OR,
+                        PRR,
+                        PHI,
+                    ])
 
-    df = pd.DataFrame(assocs, columns=['drug', 'reaction', 'patient_sex', 'replicate', 'a', 'b', 'c', 'd', 'OR', 'PRR', 'PHI'])
-    df = pd.merge(df, uncorrected_df, on=['drug', 'reaction', 'patient_sex'], how='left')
-    
+    df = pd.DataFrame(assocs, columns=['drug_id', 'drug_name', 'reaction_id', 'reaction_name', 'patient_sex', 'replicate', 'a', 'b', 'c', 'd', 'OR', 'PRR', 'PHI'])
+    df = pd.merge(df, uncorrected_df, on=['drug_id', 'reaction_id', 'patient_sex'], how='left')
+
     os.makedirs(f'./results/{start_year}-{end_year}', exist_ok=True)
     ofn = f'./results/{start_year}-{end_year}/{psm_file.split(".")[0]}_drug_reaction_associations.csv'
     print(f"Saving results to file: {ofn}")
     df.to_csv(ofn, index=False)
-
-
-
-
-

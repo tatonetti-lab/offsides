@@ -4,10 +4,72 @@ import json
 import tqdm
 import time
 import argparse
+import hashlib
 import psycopg2
 import numpy as np
 import pandas as pd
+from pathlib import Path
 from collections import defaultdict
+from typing import Dict, Tuple
+
+_DRUG_NAME_TO_ID: Dict[str, str] = {}
+_DRUG_ID_TO_NAME: Dict[str, str] = {}
+
+
+def _normalize(value: str) -> str:
+    if value is None:
+        return None
+    return value.strip()
+
+
+def _load_drug_lookup(db) -> Tuple[Dict[str, str], Dict[str, str]]:
+    if _DRUG_NAME_TO_ID:
+        return _DRUG_NAME_TO_ID, _DRUG_ID_TO_NAME
+    query = """SELECT DISTINCT ingredient_concept_name, ingredient_rxcui FROM ingredient WHERE ingredient_rxcui IS NOT NULL"""
+    results = db.execute_query(query, verbose=False)
+    for name, rxcui in results:
+        normalized = _normalize(name)
+        if not normalized or not rxcui:
+            continue
+        _DRUG_NAME_TO_ID[normalized] = rxcui
+        _DRUG_ID_TO_NAME.setdefault(rxcui, normalized)
+    return _DRUG_NAME_TO_ID, _DRUG_ID_TO_NAME
+
+
+def _reaction_id_for(name: str) -> str:
+    normalized = _normalize(name)
+    if normalized is None:
+        return None
+    digest = hashlib.sha1(normalized.upper().encode("utf-8")).hexdigest()[:16]
+    return digest
+
+
+def _compute_metrics(df: pd.DataFrame) -> pd.DataFrame:
+    result = df.copy()
+    with np.errstate(divide='ignore', invalid='ignore'):
+        or_mask = (result['b'] > 0) & (result['c'] > 0) & (result['d'] > 0)
+        result['OR'] = np.where(or_mask, (result['a'] / result['b']) / (result['c'] / result['d']), np.nan)
+
+        prr_mask = result['c'] > 0
+        result['PRR'] = np.where(
+            prr_mask,
+            (result['a'] / (result['a'] + result['b'])) / (result['c'] / (result['c'] + result['d'])),
+            np.nan,
+        )
+
+        denom = (result['a'] + result['b']) * (result['c'] + result['d']) * (result['b'] + result['d']) * (result['a'] + result['c'])
+        denom = np.where(denom > 0, np.sqrt(denom.astype(float)), np.nan)
+        result['PHI'] = np.where(
+            np.isfinite(denom) & (denom > 0),
+            (result['a'] * result['d'] - result['b'] * result['c']) / denom,
+            np.nan,
+        )
+    return result
+
+
+def _aggregate_counts(df: pd.DataFrame, group_cols) -> pd.DataFrame:
+    grouped = df.groupby(group_cols, as_index=False)[['a', 'b', 'c', 'd']].sum()
+    return _compute_metrics(grouped)
 
 class PostgresDB:
     """Class to handle PostgreSQL connection and queries."""
@@ -1048,6 +1110,92 @@ where left(receivedate, 4)::int between {start_year} and {end_year};
     
     return df
 
+def _transform_drug_drug(results_dir: Path, db) -> None:
+    path = results_dir / 'drug_drug_associations.csv'
+    if not path.exists():
+        return
+    df = pd.read_csv(path)
+    if 'drug_id' in df.columns and 'conf_drug_id' in df.columns:
+        return
+
+    name_to_id, id_to_name = _load_drug_lookup(db)
+    df['conf_drug_norm'] = df['conf_drug'].apply(_normalize)
+    df['drug_norm'] = df['drug'].apply(_normalize)
+    df['conf_drug_id'] = df['conf_drug_norm'].map(name_to_id)
+    df['drug_id'] = df['drug_norm'].map(name_to_id)
+    df = df.dropna(subset=['conf_drug_id', 'drug_id'])
+
+    counts = df[['conf_drug_id', 'drug_id', 'a', 'b', 'c', 'd']]
+    aggregated = _aggregate_counts(counts, ['conf_drug_id', 'drug_id'])
+    aggregated['conf_drug_name'] = aggregated['conf_drug_id'].map(id_to_name)
+    aggregated['drug_name'] = aggregated['drug_id'].map(id_to_name)
+    aggregated = aggregated[
+        ['conf_drug_id', 'conf_drug_name', 'drug_id', 'drug_name', 'a', 'b', 'c', 'd', 'OR', 'PRR', 'PHI']
+    ]
+    aggregated.to_csv(path, index=False)
+
+
+def _transform_drug_reaction(results_dir: Path, db) -> None:
+    path = results_dir / 'drug_reaction_associations.csv'
+    if not path.exists():
+        return
+    df = pd.read_csv(path)
+    if 'drug_id' in df.columns and 'reaction_id' in df.columns:
+        return
+
+    name_to_id, id_to_name = _load_drug_lookup(db)
+    df['drug_norm'] = df['drug'].apply(_normalize)
+    df['drug_id'] = df['drug_norm'].map(name_to_id)
+    df['reaction_norm'] = df['reaction'].apply(_normalize)
+    df['reaction_id'] = df['reaction_norm'].apply(_reaction_id_for)
+    df = df.dropna(subset=['drug_id', 'reaction_id'])
+
+    counts = df[['drug_id', 'reaction_id', 'a', 'b', 'c', 'd']]
+    aggregated = _aggregate_counts(counts, ['drug_id', 'reaction_id'])
+    aggregated['drug_name'] = aggregated['drug_id'].map(id_to_name)
+    reaction_name_map = {
+        _reaction_id_for(name): name for name in df['reaction_norm'].dropna().unique()
+    }
+    aggregated['reaction_name'] = aggregated['reaction_id'].map(reaction_name_map)
+    aggregated = aggregated[
+        ['drug_id', 'drug_name', 'reaction_id', 'reaction_name', 'a', 'b', 'c', 'd', 'OR', 'PRR', 'PHI']
+    ]
+    aggregated.to_csv(path, index=False)
+
+
+def _transform_indication_drug(results_dir: Path, db) -> None:
+    path = results_dir / 'indication_drug_associations.csv'
+    if not path.exists():
+        return
+    df = pd.read_csv(path)
+    if 'drug_id' in df.columns:
+        return
+
+    name_to_id, id_to_name = _load_drug_lookup(db)
+    df['drug_norm'] = df['drug'].apply(_normalize)
+    df['drug_id'] = df['drug_norm'].map(name_to_id)
+    df = df.dropna(subset=['drug_id'])
+
+    counts = df[['indication', 'drug_id', 'a', 'b', 'c', 'd']]
+    aggregated = counts.groupby(['indication', 'drug_id'], as_index=False)[['a', 'b', 'c', 'd']].sum()
+    aggregated = _compute_metrics(aggregated)
+    aggregated['drug_name'] = aggregated['drug_id'].map(id_to_name)
+    aggregated = aggregated[
+        ['indication', 'drug_id', 'drug_name', 'a', 'b', 'c', 'd', 'OR', 'PRR', 'PHI']
+    ]
+    aggregated.to_csv(path, index=False)
+
+
+def augment_results_with_ids(db, start_year: int, end_year: int) -> None:
+    results_dir = Path('results') / f"{start_year}-{end_year}"
+    if not results_dir.exists():
+        print(f"Results directory not found: {results_dir}")
+        return
+
+    _transform_drug_drug(results_dir, db)
+    _transform_drug_reaction(results_dir, db)
+    _transform_indication_drug(results_dir, db)
+
 def parse_args():
     parser = argparse.ArgumentParser(description="Process a range of years.")
     parser.add_argument('--start_year', type=int, required=True, help='Start year (inclusive)')
@@ -1072,4 +1220,5 @@ if __name__ == "__main__":
     sex_rea_df = sex_by_reaction_matrix(db, start_year, end_year, min_reports, save_to_file=True)
     age_rea_df = age_by_reaction_matrix(db, start_year, end_year, min_reports, save_to_file=True)
     age_drug_df = age_by_drug_matrix(db, start_year, end_year, min_reports, save_to_file=True)
+    augment_results_with_ids(db, start_year, end_year)
     db.close()

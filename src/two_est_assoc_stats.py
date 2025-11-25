@@ -12,6 +12,7 @@ import sys
 import gzip
 import tqdm
 import argparse
+import hashlib
 import numpy as np
 # import pandas as pd
 import polars as pl
@@ -21,6 +22,17 @@ from collections import defaultdict
 from build_confounding_matrices import PostgresDB
 
 MIN_REPORTS = 3
+
+
+def _normalize(value):
+    return value.strip() if isinstance(value, str) else value
+
+
+def _reaction_id(value: str) -> str:
+    normalized = _normalize(value)
+    if not normalized:
+        return None
+    return hashlib.sha1(normalized.upper().encode('utf-8')).hexdigest()[:16]
 
 def parse_args():
     parser = argparse.ArgumentParser(description="Process a range of years.")
@@ -55,10 +67,32 @@ if __name__ == "__main__":
     psm_file = psm_files[choice]
     print(f"Loading PSM data from file: {psm_file}...", end=' ')
     psm = pl.read_csv(os.path.join(results_dir, psm_file))
+    if 'drug1_id' not in psm.columns:
+        psm = psm.with_columns(pl.col('drug1').map_elements(_normalize).alias('drug1_id'))
+    if 'drug2_id' not in psm.columns:
+        psm = psm.with_columns(pl.col('drug2').map_elements(_normalize).alias('drug2_id'))
+    if 'drug1_name' not in psm.columns:
+        base = 'drug1' if 'drug1' in psm.columns else 'drug1_id'
+        psm = psm.with_columns(pl.col(base).alias('drug1_name'))
+    if 'drug2_name' not in psm.columns:
+        base = 'drug2' if 'drug2' in psm.columns else 'drug2_id'
+        psm = psm.with_columns(pl.col(base).alias('drug2_name'))
     # pandas:
-    # unique_pairs = psm[['drug1', 'drug2']].drop_duplicates()
+    # unique_pairs = psm[['drug1_id', 'drug2_id']].drop_duplicates()
     # polars:
-    unique_pairs = psm.select(['drug1', 'drug2']).unique()
+    unique_pairs = psm.select(['drug1_id', 'drug2_id']).unique()
+
+    drug_meta = {}
+    for id_col, name_col in [('drug1_id', 'drug1_name'), ('drug2_id', 'drug2_name')]:
+        subset = (
+            psm.select([pl.col(id_col), pl.col(name_col)])
+            .unique()
+            .drop_nulls()
+            .to_dict(as_series=False)
+        )
+        for key, value in zip(subset[id_col], subset[name_col]):
+            if key is not None and value is not None:
+                drug_meta[str(key)] = value
 
     print(f"OK. Found {len(unique_pairs)} unique pairs of drugs.")
 
@@ -74,11 +108,16 @@ if __name__ == "__main__":
     results = db.execute_query(query)
     report2reaction = defaultdict(set)
     reaction2report = defaultdict(set)
+    reaction_name_map = {}
     reactions = set()
     for rea, reportid in tqdm.tqdm(results):
-        report2reaction[reportid].add(rea)
-        reaction2report[rea].add(reportid)
-        reactions.add(rea)
+        reaction_id = _reaction_id(rea)
+        if reaction_id is None:
+            continue
+        report2reaction[reportid].add(reaction_id)
+        reaction2report[reaction_id].add(reportid)
+        reactions.add(reaction_id)
+        reaction_name_map.setdefault(reaction_id, rea)
     print("OK.")
 
     print("Loading reported sex data...")
@@ -104,7 +143,9 @@ if __name__ == "__main__":
         # pandas:
         # this_pair = psm[(psm['drug1']==drug1)&(psm['drug2']==drug2)]
         # polars:
-        this_pair = psm.filter((pl.col('drug1') == drug1) & (pl.col('drug2') == drug2))
+        drug1_name = drug_meta.get(drug1, drug1)
+        drug2_name = drug_meta.get(drug2, drug2)
+        this_pair = psm.filter((pl.col('drug1_id') == drug1) & (pl.col('drug2_id') == drug2))
         
         # pandas:
         # replicates = this_pair['replicate'].unique()
@@ -162,11 +203,51 @@ if __name__ == "__main__":
                         # print(f"ERROR: ZeroDivisionError for {drug1}, {drug2} and {rea}")
                         continue
 
-                    assocs.append([drug1, drug2, rea, sex, rep, a, b, c, d, OR, PRR, PHI])
+                    assocs.append([
+                        drug1,
+                        drug1_name,
+                        drug2,
+                        drug2_name,
+                        rea,
+                        reaction_name_map.get(rea, rea),
+                        sex,
+                        rep,
+                        a,
+                        b,
+                        c,
+                        d,
+                        OR,
+                        PRR,
+                        PHI,
+                    ])
     # pandas:
     # df = pd.DataFrame(assocs, columns=['drug1', 'drug2', 'reaction', 'patient_sex', 'replicate', 'a', 'b', 'c', 'd', 'OR', 'PRR', 'PHI'])
     # polars:
-    df = pl.DataFrame(assocs, schema=['drug1', 'drug2', 'reaction', 'patient_sex', 'replicate', 'a', 'b', 'c', 'd', 'OR', 'PRR', 'PHI'])
+    df = pl.DataFrame(
+        assocs,
+        schema=[
+            'drug1_id',
+            'drug1_name',
+            'drug2_id',
+            'drug2_name',
+            'reaction_id',
+            'reaction_name',
+            'patient_sex',
+            'replicate',
+            'a',
+            'b',
+            'c',
+            'd',
+            'OR',
+            'PRR',
+            'PHI',
+        ],
+    )
+    df = df.with_columns([
+        pl.col('drug1_name').alias('drug1'),
+        pl.col('drug2_name').alias('drug2'),
+        pl.col('reaction_name').alias('reaction'),
+    ])
 
     ofn = f'./results/{start_year}-{end_year}/{psm_file.split(".")[0]}_pair_reaction_associations.csv'
     print(f"Saving results to file: {ofn}")

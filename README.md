@@ -4,10 +4,11 @@ The Off-label Side Effect Resource (OffSIDES) is a collection of statistically a
 
 The process of creating the OffSIDES resource is broken down into the following steps:
 
-### Building the database
+## Building the database
 1. Download and process the latest FAERS data (e.g. from opendata.fda.gov)
  - these scripts assume that the data are in a SQL database
  - also some derivative (non-FDA) tables are necessary, see FAERSDB.md for details
+ - e.g. you can run `download_openfda.py` and `load_openfda.py` (see below for more details)
 2. Choose a date range and strata to run the anlaysis on.
  - each script takes as input --start_year and --end_year parameters
 3. Build confounding matrices
@@ -17,7 +18,7 @@ The process of creating the OffSIDES resource is broken down into the following 
 4. Generate disproportionality statistics
  - run `python3 src/est_assoc_stats.py --start_year 2004 --end_year 2004`
 
-### Evaluation
+## Evaluation
 5. Identify and build confounded reference set
  - run `python3 src/build_confounded_datasets.py --start_year 2004 --end_year 2004`
 6. Evaluate on reference sets:
@@ -39,5 +40,7 @@ python3 src/load_openfda.py --schema openfda --drop-schema
 ```
 
 The loader reads connection details from `config.json`. Use `--limit-files` for smoke tests and `--batch-size` to tune buffering. The refactored importer relies on database constraints for de-duplication, so reruns should start from an empty schema (pass `--drop-schema`).
+
+> **Concept IDs**: confounder matrices now emit both IDs and names for drugs and reactions (`drug_id`, `drug_name`, `reaction_id`, `reaction_name`). See `docs/id_migration_notes.md` for migration details and guidance on upgrading existing outputs.
 
 The loader populates `openfda.drug2rxcui` by exploding the RxCUI array embedded in each drug record, making it easy to derive ingredient links with OMOP vocabularies.

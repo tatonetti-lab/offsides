@@ -12,6 +12,7 @@ import argparse
 import numpy as np
 import pandas as pd
 from collections import defaultdict
+from typing import Dict, Tuple
 
 # import gnuplotlib as gp
 
@@ -25,6 +26,33 @@ import numpy as np
 
 MAX_SAMPLES = 50_000
 
+
+def _normalize(value):
+    return value.strip() if isinstance(value, str) else value
+
+
+def _ensure_drug_columns(df: pd.DataFrame, id_col: str, name_col: str, fallback_col: str) -> None:
+    if id_col not in df.columns and fallback_col in df.columns:
+        df[id_col] = df[fallback_col].apply(_normalize)
+    if name_col not in df.columns:
+        source = fallback_col if fallback_col in df.columns else id_col
+        df[name_col] = df[source]
+
+
+def _build_drug_metadata(ind_drug_df: pd.DataFrame, drug_drug_df: pd.DataFrame) -> Dict[str, str]:
+    parts = []
+    for cols in [('drug_id', 'drug_name'), ('conf_drug_id', 'conf_drug_name')]:
+        id_col, name_col = cols
+        if id_col in drug_drug_df.columns:
+            parts.append(drug_drug_df[[id_col, name_col]].dropna())
+    if {'drug_id', 'drug_name'} <= set(ind_drug_df.columns):
+        parts.append(ind_drug_df[['drug_id', 'drug_name']].dropna())
+    if not parts:
+        return {}
+    merged = pd.concat(parts, ignore_index=True).drop_duplicates()
+    meta = dict(zip(merged.iloc[:, 0], merged.iloc[:, 1]))
+    return meta
+
 def stratified_1n_matching(df, propensity_col='propensity_score', treatment_col='treatment', 
                            n_bins=5, match_ratio=1, random_state=42):
     df = df.copy()
@@ -36,7 +64,7 @@ def stratified_1n_matching(df, propensity_col='propensity_score', treatment_col=
     matched = []
 
     # Process each stratum
-    for stratum, group in df.groupby('stratum'):
+    for stratum, group in df.groupby('stratum', observed=False):
         treated = group[group[treatment_col] == 1]
         control = group[group[treatment_col] == 0]
 
@@ -125,9 +153,25 @@ if __name__ == "__main__":
     ind_drug_df = pd.read_csv(ind_drug_file)
     drug_drug_df = pd.read_csv(drug_drug_file)
 
-    ind_drugs = set(ind_drug_df['drug'].unique())
-    drug_drugs = set(drug_drug_df['drug'].unique())
+    _ensure_drug_columns(ind_drug_df, 'drug_id', 'drug_name', 'drug')
+    _ensure_drug_columns(drug_drug_df, 'drug_id', 'drug_name', 'drug')
+    _ensure_drug_columns(drug_drug_df, 'conf_drug_id', 'conf_drug_name', 'conf_drug')
+
+    ind_drug_df['drug_id'] = ind_drug_df['drug_id'].astype(str)
+    drug_drug_df['drug_id'] = drug_drug_df['drug_id'].astype(str)
+    drug_drug_df['conf_drug_id'] = drug_drug_df['conf_drug_id'].astype(str)
+
+    ind_drug_df['drug'] = ind_drug_df['drug_id']
+    drug_drug_df['drug'] = drug_drug_df['drug_id']
+    drug_drug_df['conf_drug'] = drug_drug_df['conf_drug_id']
+
+    drug_meta = _build_drug_metadata(ind_drug_df, drug_drug_df)
+
+    ind_drugs = set(ind_drug_df['drug_id'].unique())
+    drug_drugs = set(drug_drug_df['drug_id'].unique())
     common_drugs = sorted(ind_drugs & drug_drugs)
+    drug_id_col = 'drug_id'
+    drug_name_col = 'drug_name'
 
     print(len(ind_drugs), len(drug_drugs), len(common_drugs))
 
@@ -150,7 +194,10 @@ if __name__ == "__main__":
             ind2report = defaultdict(set)
 
             query = f"""
-            select ingredient_concept_name, snomed_term, safetyreport_id
+            select ingredient.ingredient_rxcui,
+                   ingredient.ingredient_concept_name,
+                   snomed_term,
+                   safetyreport_id
             from drug
             join ingredient on (ingredient.id = drug.id)
             join safetyreport on (safetyreport.id = safetyreport_id)
@@ -158,9 +205,14 @@ if __name__ == "__main__":
             where left(receivedate, 4)::int between {start_year} and {end_year}
             """
             results = db.execute_query(query)
-            for drug, ind, reportid in results:
-                drug2report[drug].add(reportid)
+            for drug_id_value, drug_name_value, ind, reportid in results:
+                if drug_id_value is None:
+                    continue
+                drug_id_value = str(drug_id_value)
+                drug2report[drug_id_value].add(reportid)
                 ind2report[ind].add(reportid)
+                if drug_id_value not in drug_meta and drug_name_value:
+                    drug_meta[drug_id_value] = drug_name_value
             
             with open(pkl_fp, 'wb') as fh:
                 pickle.dump((drug2report, ind2report), fh)
@@ -184,12 +236,18 @@ if __name__ == "__main__":
         if not (args.part is None) and not (start_pos <= drugidx < stop_pos):
             continue
         
-        print(f"Working on propensity score matching for {drug} ({drugidx+1} of {len(common_drugs)})")
-        if os.path.exists(os.path.join(results_dir, 'psm', f"{drugidx}_{drug}.csv.gz")):
+        drug_name_for_log = drug_meta.get(drug, drug)
+        print(f"Working on propensity score matching for {drug_name_for_log} [{drug}] ({drugidx+1} of {len(common_drugs)})")
+        per_drug_path = os.path.join(results_dir, 'psm', f"{drugidx}_{drug}.csv.gz")
+        if os.path.exists(per_drug_path):
             print(' > Found preexisting run. Will load from there.')
             if not args.part is None:
                 continue
-            drug_matched_df = pd.read_csv(os.path.join(results_dir, 'psm', f"{drugidx}_{drug}.csv.gz"))
+            drug_matched_df = pd.read_csv(per_drug_path)
+            if 'drug_id' not in drug_matched_df.columns:
+                drug_matched_df['drug_id'] = drug_matched_df['drug'].apply(_normalize)
+            if 'drug_name' not in drug_matched_df.columns:
+                drug_matched_df['drug_name'] = drug_matched_df['drug_id'].map(drug_meta).fillna(drug_matched_df['drug'])
             if matched_df is None:
                 matched_df = drug_matched_df
             else:
@@ -197,9 +255,16 @@ if __name__ == "__main__":
             continue
         
         # print(ind_drug_df.shape)
-        # print(ind_drug_df[(ind_drug_df['drug'] == drug) & (ind_drug_df['PHI'] > 0)].shape)
-        corr_inds = set(ind_drug_df[(ind_drug_df['drug'] == drug) & (ind_drug_df['PHI'] > 0)]['indication'].unique())
-        corr_drugs = set(drug_drug_df[(drug_drug_df['drug'] == drug) & (drug_drug_df['PHI'] > 0)]['conf_drug'].unique())
+        corr_inds = set(
+            ind_drug_df[(ind_drug_df[drug_id_col] == drug) & (ind_drug_df['PHI'] > 0)][
+                'indication'
+            ].unique()
+        )
+        corr_drugs = set(
+            drug_drug_df[(drug_drug_df['drug_id'] == drug) & (drug_drug_df['PHI'] > 0)][
+                'conf_drug_id'
+            ].unique()
+        )
         # print(corr_inds)
         
         if drug2report is None:
@@ -209,10 +274,10 @@ if __name__ == "__main__":
             join ingredient on (ingredient.id = drug.id)
             join safetyreport on (safetyreport.id = safetyreport_id)
             where left(receivedate, 4)::int between {start_year} and {end_year}
-            and ingredient_concept_name = '{drug}'
+            and ingredient.ingredient_rxcui = '{drug}'
             """
             result = db.execute_query(query)
-            drug_report_ids = set([row[0] for row in result])
+            drug_report_ids = {row[0] for row in result if row[0] is not None}
         else:
             drug_report_ids = drug2report[drug]
         
@@ -238,21 +303,25 @@ if __name__ == "__main__":
                 corr_inds_reports[corr_ind] = ind2report[corr_ind]
         
         corr_drugs_reports = defaultdict(set)
-        if drug2report is None:
-            query = f"""
-            select ingredient_concept_name, safetyreport_id
-            from drug
-            join ingredient on (ingredient.id = drug.id)
-            join safetyreport on (safetyreport.id = safetyreport_id)
-            where left(receivedate, 4)::int between {start_year} and {end_year}
-            and ingredient_concept_name in ('{"', '".join(corr_drugs)}');
-            """
-            result = db.execute_query(query)
-            for corr_drug, reportid in result:
-                corr_drugs_reports[corr_drug].add(reportid)
-        else:
-            for corr_drug in corr_drugs:
-                corr_drugs_reports[corr_drug] = drug2report[corr_drug]
+        if corr_drugs:
+            if drug2report is None:
+                escaped_ids = [d.replace("'", "''") for d in corr_drugs]
+                query = f"""
+                select ingredient.ingredient_rxcui, safetyreport_id
+                from drug
+                join ingredient on (ingredient.id = drug.id)
+                join safetyreport on (safetyreport.id = safetyreport_id)
+                where left(receivedate, 4)::int between {start_year} and {end_year}
+                and ingredient.ingredient_rxcui in ('{"', '".join(escaped_ids)}');
+                """
+                result = db.execute_query(query)
+                for corr_drug_id, reportid in result:
+                    if corr_drug_id is None:
+                        continue
+                    corr_drugs_reports[str(corr_drug_id)].add(reportid)
+            else:
+                for corr_drug in corr_drugs:
+                    corr_drugs_reports[corr_drug] = drug2report[corr_drug]
         
         reports = defaultdict(set)
         for indication in corr_inds:
@@ -325,8 +394,8 @@ if __name__ == "__main__":
             clf.fit(X, y)
             probas = clf.predict_proba(X)[:,1]
         except Exception as e:
-            print(f'ERROR: Failed for {drug} at fitting the model with exception: {e}. Skipping.')
-            logfh.write(f'ERROR: Failed for {drug} at fitting the model with exception: {e}')
+            print(f'ERROR: Failed for {drug_name_for_log} [{drug}] at fitting the model with exception: {e}. Skipping.')
+            logfh.write(f'ERROR: Failed for {drug_name_for_log} [{drug}] at fitting the model with exception: {e}\n')
             continue
 
         df = pd.DataFrame({
@@ -336,9 +405,11 @@ if __name__ == "__main__":
         })
         drug_matched_df = run_multiple_matchings(df, num_replicates=nreps, match_ratio=match_ratio)
         drug_matched_df['drug'] = drug
+        drug_matched_df['drug_id'] = drug
+        drug_matched_df['drug_name'] = drug_name_for_log
         drug_matched_df['auroc'] = np.mean(auroc)
 
-        drug_matched_df.to_csv(os.path.join(results_dir, 'psm', f"{drugidx}_{drug}.csv.gz"), index=False)
+        drug_matched_df.to_csv(per_drug_path, index=False)
         
         if args.part is None:
             if matched_df is None:
