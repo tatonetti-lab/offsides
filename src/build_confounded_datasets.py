@@ -6,7 +6,7 @@ import numpy as np
 import polars as pd
 import matplotlib.pyplot as plt
 
-def load_csv_files(start_year=2004, end_year=2004):
+def load_csv_files(start_year, end_year):
     """
     Loads the indication-reaction, indication-drug, and drug-reaction association CSV files into Pandas DataFrames.
 
@@ -36,31 +36,49 @@ def load_csv_files(start_year=2004, end_year=2004):
         file_path = os.path.join(results_dir, filename)
         # Load CSVs into DataFrames
         try:
-            dfs[dfkey] = pd.read_csv(file_path)
-            print(f"Loaded {len(dfs[dfkey])} rows from {file_path}. Stored at key: {dfkey}")
+            df = pd.read_csv(file_path)
+
+            # --- CANONICALIZE drug_id type ---
+            if 'drug_id' in df.columns:
+                df = df.with_columns(
+                    pd.col('drug_id').cast(pd.Utf8)
+                )
+
+            dfs[dfkey] = df
+            print(f"Loaded {len(df)} rows from {file_path}. Stored at key: {dfkey}")
         except Exception as e:
             print(f"Error loading {file_path}: {e}")
             dfs[dfkey] = None
 
     return dfs
 
-def polars_join_with_suffixes(df1, df2, on, how="inner", suffixes=("_x", "_y")):
-    if not type (on) is list:
-        on = [on]
-    overlap = set(df1.columns) & set(df2.columns) - set(on)
-    # print(df1.columns)
-    # print(df2.columns)
-    # print(overlap)
-    # print(set(on))
-    df1_renamed = df1.rename({col: f"{col}{suffixes[0]}" for col in overlap})
-    df2_renamed = df2.rename({col: f"{col}{suffixes[1]}" for col in overlap})
-    return df1_renamed.join(df2_renamed, on=on, how=how)
+def polars_join_with_suffixes(
+    df1,
+    df2,
+    left_on,
+    right_on,
+    how="inner",
+    suffixes=("_x", "_y"),
+):
+    # rename overlapping non-key columns
+    overlap = set(df1.columns) & set(df2.columns)
+    overlap -= {left_on, right_on}
+
+    df1_renamed = df1.rename({c: f"{c}{suffixes[0]}" for c in overlap if c in df1.columns})
+    df2_renamed = df2.rename({c: f"{c}{suffixes[1]}" for c in overlap if c in df2.columns})
+
+    return df1_renamed.join(
+        df2_renamed,
+        left_on=left_on,
+        right_on=right_on,
+        how=how,
+    )
 
 def confounder_drug_reaction_correlation(
     ind_rea_df, ind_drug_df, drug_rea_df, 
-    conf_rea_threshold=100, min_threshold_for_drug=40, num_bins=30, type='proportion',
+    conf_rea_threshold, min_threshold_for_drug, type,conf_col_name, title, num_bins=30,
     conf_rea_col = 'PRR', conf_drug_col = 'PHI', drug_rea_col = 'PRR',
-    conf_col_name='indication', title=None, newfig=True, color='k', label=None
+    newfig=True, color='k', label=None
 ):
     """
     Plots:
@@ -82,24 +100,99 @@ def confounder_drug_reaction_correlation(
     Returns:
         data (pd.DataFrame): DataFrame with possibly confounded drug-reaction associations.
     """
-    indication_reactions = ind_rea_df.filter(ind_rea_df[conf_rea_col]>conf_rea_threshold)
-    # indication_reactions = ind_rea_df[ind_rea_df[conf_rea_col]>conf_rea_threshold]
+    if conf_col_name == "conf_drug":
+        df_conf_col = "conf_drug_name"  # or "conf_drug_id" if you prefer
+    else:
+        df_conf_col = conf_col_name
+    # Convert to Python list of strings
+    indication_names = ind_drug_df.select(df_conf_col).unique().to_series().cast(str).to_list()
+    indication_reactions = ind_rea_df.filter(pd.col(conf_rea_col) > conf_rea_threshold)
+    indication_reactions = indication_reactions.filter(
+        ~pd.col("reaction_name").is_in(indication_names)
+    )
     
     data = None
-    for ind in tqdm.tqdm(indication_reactions[conf_col_name].unique()):
-        relevant_reactions = list(set(indication_reactions.filter(indication_reactions[conf_col_name] == ind)["reaction"]))
-        # id = ind_drug_df[ind_drug_df[conf_col_name]==ind]
-        id = ind_drug_df.filter(ind_drug_df[conf_col_name]==ind)
-        # dr = drug_rea_df[drug_rea_df['reaction'].isin(relevant_reactions)]
-        dr = drug_rea_df.filter(drug_rea_df['reaction'].is_in(relevant_reactions))
-        #re = id.merge(dr, on="drug", suffixes=['_conf_drug', '_drug_rea'])[[conf_col_name, 'reaction', 'drug', f'{conf_drug_col}_conf_drug', f'{drug_rea_col}_drug_rea']]
-        re = polars_join_with_suffixes(id, dr, on="drug", suffixes=['_conf_drug', '_drug_rea'])[[conf_col_name, 'reaction', 'drug', f'{conf_drug_col}_conf_drug', f'{drug_rea_col}_drug_rea']]
+    import csv
+    skipped_indications = []
+    ind_drug_df = ind_drug_df.with_columns(pd.col("drug_id").cast(pd.Utf8))
+    drug_rea_df = drug_rea_df.with_columns(pd.col("drug_id").cast(pd.Utf8))
+
+    for ind in tqdm.tqdm(indication_reactions[df_conf_col].unique()):
+        relevant_reactions = (
+            indication_reactions
+            .filter(pd.col(df_conf_col) == ind)
+            .select("reaction_name")
+            .unique()
+            .to_series()
+            .to_list()
+        )
+        id = ind_drug_df.filter(
+            (ind_drug_df[df_conf_col] == ind) &
+            (~ind_drug_df[conf_drug_col].is_null())
+        )
+        dr = drug_rea_df.filter(drug_rea_df['reaction_name'].is_in(relevant_reactions))
+
+        if id.height == 0 or dr.height==0:
+            skipped_indications.append({
+                'indication': ind,
+                'num_drug_rows': id.height,
+                'num_reaction_rows': dr.height,
+                'num_relevant_reactions': len(relevant_reactions)
+            })
+            continue  # skip the join
+
+        # DEBUG: print shapes
+        print(f"\nProcessing confounder: {ind}")
+        print(f"id shape: {id.shape}, dr shape: {dr.shape}")
+        
+        # Skip if either df is empty
+        if id.height == 0:
+            print(f"Skipping {ind}: no confounder-drug rows")
+            continue
+        if dr.height == 0:
+            print(f"Skipping {ind}: no drug-reaction rows")
+            continue
+
+        # Proceed with join
+        re = polars_join_with_suffixes(
+            id,
+            dr,
+            left_on="drug_id",
+            right_on="drug_id",
+            suffixes=("_conf_drug", "_drug_rea")
+        )[[
+            df_conf_col,
+            "reaction_name",
+            "drug_id",
+            f"{conf_drug_col}_conf_drug",
+            f"{drug_rea_col}_drug_rea",
+        ]]
         if data is None:
             data = re
         else:
             #data = pd.concat([data, re], ignore_index=True)
             data = pd.concat([data, re])
 
+    import csv
+
+    # Save skipped indications to CSV in current folder
+    outpath = "skipped_indications.csv"
+
+    with open(outpath, 'w', newline='') as f:
+        writer = csv.DictWriter(
+            f,
+            fieldnames=['indication', 'num_drug_rows', 'num_reaction_rows', 'num_relevant_reactions']
+        )
+        writer.writeheader()
+        writer.writerows(skipped_indications)
+
+    print(f"Skipped indications saved to: {outpath}")
+
+    if data is None or len(data) == 0:
+        print("No valid drug-reaction pairs found. Exiting function.")
+        breakpoint()
+        print("Check skipped_indications.csv for details.")
+        return None
     #sorted_data = data.sort_values(by=f'{conf_drug_col}_conf_drug')
     sorted_data = data.sort(f'{conf_drug_col}_conf_drug')
     
@@ -111,12 +204,16 @@ def confounder_drug_reaction_correlation(
         start = b * bin_size
         end = (b + 1) * bin_size if b < num_bins - 1 else sorted_data.height
         df = sorted_data.slice(start, end - start)
-        #yprop = (df[f'{drug_rea_col}_drug_rea'] > min_threshold_for_drug).sum()/df[f'{drug_rea_col}_drug_rea'].shape[0]
+
+        if df.height == 0:
+            continue
         colname = f"{drug_rea_col}_drug_rea"
-        yprop = df.filter(df[colname] > min_threshold_for_drug).height / df.height
+        yprop = (
+            df.filter(df[colname] > min_threshold_for_drug).height / df.height
+        )
         ymu = df[f'{drug_rea_col}_drug_rea'].mean()
         xmu = df[f'{conf_drug_col}_conf_drug'].mean()
-        #print(b, xmu, ymu, yprop)
+
         plot_data.append((xmu, ymu, yprop))
 
     x, ymu, yprop = zip(*plot_data)
@@ -160,7 +257,7 @@ if __name__ == "__main__":
     # Load DataFrames
     start_year = args.start_year
     end_year = args.end_year
-    min_threshold_for_drug = 5
+    min_threshold_for_drug = 200
     dfs = load_csv_files(start_year, end_year)
 
     results_dir = os.path.join('results', f'{start_year}-{end_year}')
@@ -182,10 +279,13 @@ if __name__ == "__main__":
         label='Uncorrected'
     )
 
-    psm_10_5_df = pd.read_csv(os.path.join(results_dir, 'hdpsm_nrep10_mratio5_maxsamp50000_drug_reaction_associations.csv'))
+    psm_10_5_df = pd.read_csv(os.path.join(results_dir, 'hdpsm_nrep5_mratio5_maxsamp25000_drug_reaction_associations.csv'))
     psm_10_5_df.head()
 
     rep0 = psm_10_5_df.filter((psm_10_5_df['replicate']==0) & (psm_10_5_df['patient_sex']=='All'))
+    rep0 = rep0.with_columns(
+        pd.col("drug_id").cast(pd.Utf8)
+    )
 
     _ = confounder_drug_reaction_correlation(
         dfs['ind_rea_df'],  # DataFrame for confounder-reaction links
@@ -208,12 +308,25 @@ if __name__ == "__main__":
 
     # indications.sort_values(by='PRR_drug_rea', ascending=False).head(20)
     # indications[indications['PRR_drug_rea'] > min_threshold_for_drug].to_csv(f'../results/{start_year}-{end_year}/indication_confounded_examples.csv')
-    indications.filter(indications['PRR_drug_rea'] > min_threshold_for_drug).write_csv(os.path.join(results_dir, 'indication_confounded_examples.csv'))
+    # Map drug_id to drug_name using drug_rea_df
+    drug_id_to_name = dict(zip(dfs['drug_rea_df']['drug_id'], dfs['drug_rea_df']['drug_name']))
+    drug_id_to_name = {str(k): v for k, v in drug_id_to_name.items()}
+    indications = indications.with_columns([pd.col("drug_id").str.strip_chars(' "\'').alias("drug_id")])
+    indications = indications.with_columns([pd.col("drug_id").map_elements(lambda x: drug_id_to_name.get(x, None), return_dtype=pd.Utf8).alias("drug_name")])
+
+
+    # Save CSV with drug_name included
+    indications.filter(indications['PRR_drug_rea'] > min_threshold_for_drug).write_csv(
+        os.path.join(results_dir, 'indication_confounded_examples.csv')
+    )
 
     # conf_drug_rea_df = dfs['drug_rea_df'].copy()
-    conf_drug_rea_df = dfs['drug_rea_df'].clone()
+    #conf_drug_rea_df = dfs['drug_rea_df'].clone()
     # conf_drug_rea_df.rename(columns={'drug': 'conf_drug'}, inplace=True)
-    conf_drug_rea_df = conf_drug_rea_df.rename({'drug': 'conf_drug'})
+    #conf_drug_rea_df = conf_drug_rea_df.rename({'drug_id': 'conf_drug'})
+    conf_drug_rea_df = dfs['drug_rea_df'].clone().with_columns(
+        pd.col("drug_name").alias("conf_drug_name")
+    )
 
     print("Processing confounded by drug...")
     drugs = confounder_drug_reaction_correlation(
@@ -253,7 +366,11 @@ if __name__ == "__main__":
 
     # drugs.sort_values(by='PRR_drug_rea', ascending=False).head(20)
     # drugs[drugs['PRR_drug_rea'] > min_threshold_for_drug].to_csv(f'../results/{start_year}-{end_year}/drug_confounded_examples.csv')
-    drugs.filter(drugs['PRR_drug_rea'] > min_threshold_for_drug).write_csv(os.path.join(results_dir, 'drug_confounded_examples.csv'))
+    drugs = drugs.with_columns([pd.col("drug_id").str.strip_chars(' "\'').alias("drug_id")])
+    drugs = drugs.with_columns([pd.col("drug_id").map_elements(lambda x: drug_id_to_name.get(x, None), return_dtype=pd.Utf8).alias("drug_name")])
+    drugs.filter(drugs['PRR_drug_rea'] > min_threshold_for_drug).write_csv(
+        os.path.join(results_dir, 'drug_confounded_examples.csv')
+    )
 
     print("Processing confounded by sex...")
     sexes = confounder_drug_reaction_correlation(
@@ -293,7 +410,11 @@ if __name__ == "__main__":
 
     # sexes.sort_values(by='PRR_drug_rea', ascending=False).head(20)
     # sexes[sexes['PRR_drug_rea'] > min_threshold_for_drug].to_csv(f'../results/{start_year}-{end_year}/sex_confounded_examples.csv')
-    sexes.filter(sexes['PRR_drug_rea'] > min_threshold_for_drug).write_csv(os.path.join(results_dir, 'sex_confounded_examples.csv'))
+    sexes = sexes.with_columns([pd.col("drug_id").str.strip_chars(' "\'').alias("drug_id")])
+    sexes = sexes.with_columns([pd.col("drug_id").map_elements(lambda x: drug_id_to_name.get(x, None), return_dtype=pd.Utf8).alias("drug_name")])
+    sexes.filter(sexes['PRR_drug_rea'] > min_threshold_for_drug).write_csv(
+        os.path.join(results_dir, 'sex_confounded_examples.csv')
+    )
 
     print("Processing confounded by age...")
     ages = confounder_drug_reaction_correlation(
@@ -334,4 +455,8 @@ if __name__ == "__main__":
 
     # ages.sort_values(by='PRR_drug_rea', ascending=False).head(20)
     # ages[ages['PRR_drug_rea'] > min_threshold_for_drug].to_csv(f'../results/{start_year}-{end_year}/age_confounded_examples.csv')
-    ages.filter(ages['PRR_drug_rea'] > min_threshold_for_drug).write_csv(os.path.join(results_dir, 'age_confounded_examples.csv'))
+    ages = ages.with_columns([pd.col("drug_id").str.strip_chars(' "\'').alias("drug_id")])
+    ages = ages.with_columns([pd.col("drug_id").map_elements(lambda x: drug_id_to_name.get(x, None), return_dtype=pd.Utf8).alias("drug_name")])
+    ages.filter(ages['PRR_drug_rea'] > min_threshold_for_drug).write_csv(
+        os.path.join(results_dir, 'age_confounded_examples.csv')
+    )

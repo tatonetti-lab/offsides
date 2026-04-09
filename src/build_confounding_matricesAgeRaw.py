@@ -138,24 +138,20 @@ class PostgresDB:
             self.connection.close()
             self.connection = None
 
-def age_by_drug_matrix(db, start_year, end_year, min_reports, save_to_file):
+def age_by_drug_matrix(db, start_year, end_year, min_reports, save_to_file=None):
     """
     Computes contingency tables and association metrics (OR, PRR, PHI)
-    between age groups and RXCUI drugs.
+    using raw patient ages and RXCUI drugs.
     """
     print(f"Querying age–drug counts (RXCUI)...")
     age_drug_counts = defaultdict(int)
     ages = set()
     drugs = set()
 
-    # --- Joint counts: age x drug ---
+    # --- Joint counts: raw age x drug ---
     query = f"""
     SELECT
-        CASE
-            WHEN r.patientonsetage < 20 THEN 'Younger'
-            WHEN r.patientonsetage > 60 THEN 'Older'
-            ELSE 'Middle'
-        END AS age_group,
+        r.patientonsetage AS age,
         di.ingredient_rxcui AS drug_rxcui,
         COUNT(DISTINCT r.safetyreportid) AS count_reports
     FROM openfda.reports r
@@ -165,7 +161,7 @@ def age_by_drug_matrix(db, start_year, end_year, min_reports, save_to_file):
       AND EXTRACT(YEAR FROM r.receivedate)::int BETWEEN {start_year} AND {end_year}
       AND r.patientonsetageunit = '801'
       AND r.patientonsetage < 130
-    GROUP BY age_group, drug_rxcui
+    GROUP BY age, drug_rxcui
     HAVING COUNT(DISTINCT r.safetyreportid) >= {min_reports};
     """
     results = db.execute_query(query)
@@ -179,24 +175,15 @@ def age_by_drug_matrix(db, start_year, end_year, min_reports, save_to_file):
     print("Querying age marginals...")
     age_count = defaultdict(int)
     query = f"""
-    SELECT age_group, COUNT(DISTINCT safetyreportid)
-    FROM (
-        SELECT
-            r.safetyreportid,
-            CASE
-                WHEN r.patientonsetage < 20 THEN 'Younger'
-                WHEN r.patientonsetage > 60 THEN 'Older'
-                ELSE 'Middle'
-            END AS age_group
-        FROM openfda.reports r
-        JOIN openfda.drug_ingredient di
-          ON r.safetyreportid = di.safetyreportid
-        WHERE di.ingredient_rxcui IS NOT NULL
-          AND EXTRACT(YEAR FROM r.receivedate)::int BETWEEN {start_year} AND {end_year}
-          AND r.patientonsetageunit = '801'
-          AND r.patientonsetage < 130
-    ) t
-    GROUP BY age_group;
+    SELECT r.patientonsetage AS age, COUNT(DISTINCT r.safetyreportid)
+    FROM openfda.reports r
+    JOIN openfda.drug_ingredient di
+      ON r.safetyreportid = di.safetyreportid
+    WHERE di.ingredient_rxcui IS NOT NULL
+      AND EXTRACT(YEAR FROM r.receivedate)::int BETWEEN {start_year} AND {end_year}
+      AND r.patientonsetageunit = '801'
+      AND r.patientonsetage < 130
+    GROUP BY age;
     """
     results = db.execute_query(query)
     for age, count in results:
@@ -258,9 +245,6 @@ def age_by_drug_matrix(db, start_year, end_year, min_reports, save_to_file):
 
             if b < 0 or c < 0 or d < 0:
                 invalid_tables += 1
-                warnings.warn(
-                    f"Negative contingency: age={age}, drug={drug}, a={a}, b={b}, c={c}, d={d}"
-                )
                 continue
 
             OR = (a / b) / (c / d) if b > 0 and c > 0 and d > 0 else None
@@ -1466,13 +1450,13 @@ if __name__ == "__main__":
     end_year = args.end_year
     min_reports = 25
     
-    ind_rea_df = indication_by_reaction_matrix(db, start_year, end_year, min_reports, save_to_file=True)
-    ind_drug_df = indication_by_drug_matrix(db, start_year, end_year, min_reports, save_to_file=True)
-    drug_rea_df = drug_by_reaction_matrix(db, start_year, end_year, min_reports, save_to_file=True)
-    drug_drug_df = drug_by_drug_matrix(db, start_year, end_year, min_reports, save_to_file=True)
-    sex_drug_df = sex_by_drug_matrix(db, start_year, end_year, min_reports, save_to_file=True)
-    sex_rea_df = sex_by_reaction_matrix(db, start_year, end_year, min_reports, save_to_file=True)
-    age_rea_df = age_by_reaction_matrix(db, start_year, end_year, min_reports, save_to_file=True)
+    #ind_rea_df = indication_by_reaction_matrix(db, start_year, end_year, min_reports, save_to_file=True)
+    #ind_drug_df = indication_by_drug_matrix(db, start_year, end_year, min_reports, save_to_file=True)
+    #drug_rea_df = drug_by_reaction_matrix(db, start_year, end_year, min_reports, save_to_file=True)
+    #drug_drug_df = drug_by_drug_matrix(db, start_year, end_year, min_reports, save_to_file=True)
+    #sex_drug_df = sex_by_drug_matrix(db, start_year, end_year, min_reports, save_to_file=True)
+    #sex_rea_df = sex_by_reaction_matrix(db, start_year, end_year, min_reports, save_to_file=True)
+    #age_rea_df = age_by_reaction_matrix(db, start_year, end_year, min_reports, save_to_file=True)
     age_drug_df = age_by_drug_matrix(db, start_year, end_year, min_reports, save_to_file=True)
-    augment_results_with_ids(db, start_year, end_year)
+    #augment_results_with_ids(db, start_year, end_year)
     db.close()

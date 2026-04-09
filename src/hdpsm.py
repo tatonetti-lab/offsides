@@ -1,37 +1,55 @@
 """
-Run high-dimensional propensity score matching to control for confounding effects. 
+High-dimensional propensity score matching (HDPSM) script — improved.
 
+Features:
+- Sparse matrices for memory efficiency
+- Parallel processing of drugs
+- Automatic skipping of completed drugs
+- Clean logging per part
+- Reproducible random sampling
 """
 
 import os
-import tqdm
-import time
-import shutil
-import pickle
+os.environ["JOBLIB_START_METHOD"] = "fork"
+os.environ["OMP_NUM_THREADS"] = "1"
+os.environ["MKL_NUM_THREADS"] = "1"
+
 import argparse
+from pathlib import Path
+from collections import defaultdict
+import pickle
 import numpy as np
 import pandas as pd
-from collections import defaultdict
-from typing import Dict, Tuple
-
-# import gnuplotlib as gp
-
+from joblib import Parallel, delayed
+from scipy.sparse import csr_matrix
 from sklearn import linear_model
-from sklearn.model_selection import cross_val_score
+from sklearn.model_selection import cross_val_score, StratifiedKFold
+import logging
+import tqdm
 
 from build_confounding_matrices import PostgresDB
 
-import pandas as pd
-import numpy as np
+MAX_SAMPLES = 5000
+NREPS = 3
+MATCH_RATIO = 5
 
-MAX_SAMPLES = 50_000
+
+def setup_logger(part=None):
+    log_fp = f"hdpsm_part{part}.log" if part else "hdpsm.log"
+    logging.basicConfig(
+        filename=log_fp,
+        filemode="a",
+        level=logging.INFO,
+        format="%(asctime)s [%(levelname)s] %(message)s"
+    )
+    return logging.getLogger()
 
 
 def _normalize(value):
     return value.strip() if isinstance(value, str) else value
 
 
-def _ensure_drug_columns(df: pd.DataFrame, id_col: str, name_col: str, fallback_col: str) -> None:
+def _ensure_drug_columns(df, id_col, name_col, fallback_col):
     if id_col not in df.columns and fallback_col in df.columns:
         df[id_col] = df[fallback_col].apply(_normalize)
     if name_col not in df.columns:
@@ -39,387 +57,463 @@ def _ensure_drug_columns(df: pd.DataFrame, id_col: str, name_col: str, fallback_
         df[name_col] = df[source]
 
 
-def _build_drug_metadata(ind_drug_df: pd.DataFrame, drug_drug_df: pd.DataFrame) -> Dict[str, str]:
+def _build_drug_metadata(ind_df, drug_df):
     parts = []
-    for cols in [('drug_id', 'drug_name'), ('conf_drug_id', 'conf_drug_name')]:
-        id_col, name_col = cols
-        if id_col in drug_drug_df.columns:
-            parts.append(drug_drug_df[[id_col, name_col]].dropna())
-    if {'drug_id', 'drug_name'} <= set(ind_drug_df.columns):
-        parts.append(ind_drug_df[['drug_id', 'drug_name']].dropna())
+    for id_col, name_col in [('drug_id', 'drug_name'), ('conf_drug_id', 'conf_drug_name')]:
+        if id_col in drug_df.columns:
+            parts.append(drug_df[[id_col, name_col]].dropna())
+    if {'drug_id', 'drug_name'} <= set(ind_df.columns):
+        parts.append(ind_df[['drug_id', 'drug_name']].dropna())
     if not parts:
         return {}
     merged = pd.concat(parts, ignore_index=True).drop_duplicates()
-    meta = dict(zip(merged.iloc[:, 0], merged.iloc[:, 1]))
-    return meta
+    return dict(zip(merged.iloc[:, 0], merged.iloc[:, 1]))
 
-def stratified_1n_matching(df, propensity_col='propensity_score', treatment_col='treatment', 
-                           n_bins=5, match_ratio=1, random_state=42):
-    df = df.copy()
-    np.random.seed(random_state)
 
-    # Assign strata based on propensity score
-    df['stratum'] = pd.qcut(df[propensity_col], q=n_bins, duplicates='drop')
+def downsample_pos_neg(y, max_samples, rng):
+    pos_idx = np.where(y == 1)[0]
+    neg_idx = np.where(y == 0)[0]
+    n_pos_keep = min(len(pos_idx), max_samples // 2)
+    n_neg_keep = min(max_samples - n_pos_keep, len(neg_idx))
+    keep_idx = np.concatenate([
+        rng.choice(pos_idx, n_pos_keep, replace=False),
+        rng.choice(neg_idx, n_neg_keep, replace=False)
+    ])
+    rng.shuffle(keep_idx)
+    return keep_idx
 
-    matched = []
+from sklearn.neighbors import NearestNeighbors
 
-    # Process each stratum
-    for stratum, group in df.groupby('stratum', observed=False):
-        treated = group[group[treatment_col] == 1]
-        control = group[group[treatment_col] == 0]
+def match_psm(report_ids, y, propensity, ratio=5):
 
-        if treated.empty or control.empty:
-            continue  # Drop stratum if one group is missing
+    treated_idx = np.where(y == 1)[0]
+    control_idx = np.where(y == 0)[0]
 
-        # Shuffle control for randomness
-        control = control.sample(frac=1, random_state=random_state)
+    if len(treated_idx) == 0 or len(control_idx) == 0:
+        return None
 
-        for _, treated_row in treated.iterrows():
-            # Sample n controls for each treated unit
-            sampled_controls = control.sample(n=match_ratio, replace=False) \
-                if len(control) >= match_ratio else None
+    # sort controls by propensity
+    control_idx = control_idx.copy()
+    np.random.shuffle(control_idx)
+    control_sorted = control_idx[np.argsort(propensity[control_idx])]
 
-            if sampled_controls is not None:
-                matched.append(pd.concat([treated_row.to_frame().T, sampled_controls], axis=0))
+    matched_rows = []
+    stratum_id = 0
+    used_controls = 0
 
-    if not matched:
-        return pd.DataFrame()  # return empty if nothing matched
+    for t in treated_idx:
+        stratum_id += 1
 
-    matched_df = pd.concat(matched, axis=0).reset_index(drop=True)
-    return matched_df
+        # treated
+        matched_rows.append({
+            "report_id": report_ids[t],
+            "treatment": 1,
+            "propensity_score": propensity[t],
+            "stratum": stratum_id
+        })
 
-def run_multiple_matchings(df, num_replicates=10, **match_kwargs):
-    all_matches = []
+        # take next K controls (greedy)
+        for j in range(ratio):
+            c = control_sorted[(used_controls + j) % len(control_sorted)]
+            matched_rows.append({
+                "report_id": report_ids[c],
+                "treatment": 0,
+                "propensity_score": propensity[c],
+                "stratum": stratum_id
+            })
 
-    for rep in range(num_replicates):
-        matched = stratified_1n_matching(df, random_state=rep, **match_kwargs)
-        if not matched.empty:
-            matched['replicate'] = rep
-            all_matches.append(matched)
+        used_controls += ratio
 
-    if all_matches:
-        return pd.concat(all_matches, ignore_index=True)
+    return pd.DataFrame(matched_rows)
+
+from itertools import repeat
+
+def build_drug_dataset(drug, drug2report, ind2report,
+                       ind_drug_df, drug_drug_df,
+                       MAX_SAMPLES, rng_global):
+
+    corr_inds = set(
+        ind_drug_df[
+            (ind_drug_df["drug_id"] == drug) &
+            (ind_drug_df["PHI"] > 0)
+        ]["indication"].dropna().unique()
+    )
+
+    corr_drugs = set(
+        drug_drug_df[
+            (drug_drug_df["drug_id"] == drug) &
+            (drug_drug_df["PHI"] > 0)
+        ]["conf_drug_id"].dropna().unique()
+    )
+
+    reports = defaultdict(set)
+
+    for ind in corr_inds:
+        if ind in ind2report:
+            for rid in ind2report[ind]:
+                reports[rid].add(ind)
+
+    for d in corr_drugs:
+        if d in drug2report:
+            for rid in drug2report[d]:
+                reports[rid].add(d)
+
+    features = sorted(corr_drugs | corr_inds)
+    if not features:
+        return None
+
+    sorted_reportids_full = np.array(sorted(reports.keys()))
+
+    drug_pos_set = set(drug2report.get(drug, []))
+
+    y_full = np.array(
+        [1 if rid in drug_pos_set else 0 for rid in sorted_reportids_full],
+        dtype=np.uint8
+    )
+
+    # downsample once
+    if len(sorted_reportids_full) > MAX_SAMPLES:
+        pos_idx = np.where(y_full == 1)[0]
+        neg_idx = np.where(y_full == 0)[0]
+
+        n_pos = min(len(pos_idx), MAX_SAMPLES // 2)
+        n_neg = min(len(neg_idx), MAX_SAMPLES - n_pos)
+
+        keep = np.concatenate([
+            rng_global.choice(pos_idx, n_pos, replace=False),
+            rng_global.choice(neg_idx, n_neg, replace=False)
+        ])
+
+        keep.sort()
+
+        sorted_reportids = sorted_reportids_full[keep]
+        y = y_full[keep]
     else:
-        print("No matches found in any replicate.")
-        return pd.DataFrame()
+        sorted_reportids = sorted_reportids_full
+        y = y_full
+
+    # feature index
+    feat_idx = {f: i for i, f in enumerate(features)}
+
+    # sparse matrix build (once!)
+    rows = []
+    cols = []
+    feature_set = set(features)
+
+    for i, rid in enumerate(sorted_reportids):
+        valid_feats = [
+            feat_idx[f]
+            for f in reports[rid]
+            if f in feature_set and f in feat_idx
+        ]
+
+        rows.extend(repeat(i, len(valid_feats)))
+        cols.extend(valid_feats)
+
+    X = csr_matrix(
+        (np.ones(len(rows), dtype=np.uint8), (rows, cols)),
+        shape=(len(sorted_reportids), len(features)),
+        dtype=np.uint8
+    )
+
+    return {
+        "X": X,
+        "y": y,
+        "report_ids": sorted_reportids,
+        "drug_pos_set": drug_pos_set
+    }
+
+from sklearn.model_selection import train_test_split
+from sklearn.metrics import roc_auc_score
+def process_drug(
+    drug_idx,
+    drug,
+    drug_meta,
+    ind_drug_df,
+    drug_drug_df,
+    drug2report,
+    ind2report,
+    results_dir,
+    seed = None
+):
+    drug2rep = drug2report
+    ind2rep = ind2report
+    rng_global = np.random.default_rng(seed + drug_idx)
+    drug_name_for_log = drug_meta.get(drug, drug)
+    per_drug_path = results_dir / "psmWnreps" / f"{drug_idx}_{drug}.csv.gz"
+
+    if per_drug_path.exists():
+        logging.info(f"Skipping completed drug: {drug_name_for_log} [{drug}]")
+        return None
+
+    data = build_drug_dataset(
+        drug,
+        drug2rep,
+        ind2rep,
+        ind_drug_df,
+        drug_drug_df,
+        MAX_SAMPLES,
+        rng_global
+    )
+
+    if data is None:
+        return None
+
+    X = data["X"]
+    y = data["y"]
+    sorted_reportids = data["report_ids"]
+
+    # -----------------------------
+    # PRECOMPUTE ONCE PER DRUG
+    # -----------------------------
+    treated_idx = np.flatnonzero(y)
+    control_idx = np.flatnonzero(1 - y)
+
+    n_treated = len(treated_idx)
+    n_control = len(control_idx)
+
+    n = len(y)
+
+    # -----------------------------
+    # NREPS LOOP (NEW)
+    # -----------------------------
+    cv = StratifiedKFold(n_splits=NREPS, shuffle=True, random_state=42 + drug_idx)
+
+    clf = linear_model.SGDClassifier(loss="log_loss", penalty="l2")
+
+    all_rep_results = []
+
+    X_all = X  # alias (clarity + avoids attribute lookup cost)
+
+    for rep, (train_idx, test_idx) in enumerate(cv.split(X, y)):
+
+        X_train = X[train_idx]
+        y_train = y[train_idx]
+        X_test = X[test_idx]
+        y_test = y[test_idx]
+
+        # CRITICAL FIX: skip bad splits
+        if len(np.unique(y_train)) < 2 or len(np.unique(y_test)) < 2:
+            logging.warning(f"{drug} rep {rep}: only one class in split — skipping")
+            continue
+
+        clf.fit(X_train, y_train)
+
+        auroc = roc_auc_score(
+            y_test,
+            clf.predict_proba(X_test)[:, 1]
+        )
+
+        propensity = clf.predict_proba(X_all)[:, 1]
+
+        matched_df = match_psm(
+            sorted_reportids,
+            y,
+            propensity,
+            ratio=MATCH_RATIO
+        )
+
+        if matched_df is None:
+            continue
+
+        # IMPORTANT: create a COPY so no shared mutation
+        matched_df = matched_df.copy()
+
+        matched_df["replicate"] = rep
+        matched_df["drug"] = drug
+        matched_df["drug_id"] = drug
+        matched_df["drug_name"] = drug_meta.get(drug, None)
+        matched_df["auroc"] = auroc
+
+        all_rep_results.append(matched_df)
+
+    # -----------------------------
+    # combine replicates
+    # -----------------------------
+    if not all_rep_results:
+        logging.info(f"Skipping {drug_name_for_log} [{drug}]: no matches across replicates")
+        return None
+
+    df_out = pd.concat(all_rep_results, ignore_index=True)
+
+    df_out.to_csv(per_drug_path, index=False, compression="gzip")
+
+    logging.info(f"Finished {drug_name_for_log} [{drug}] with {NREPS} reps")
+
+    return df_out
 
 def parse_args():
-    parser = argparse.ArgumentParser(description="Process a range of years.")
-    parser.add_argument('--start_year', type=int, required=True, help='Start year (inclusive)')
-    parser.add_argument('--end_year', type=int, required=True, help='End year (inclusive)')
-    parser.add_argument('--part', type=int, required=False, help="Which part of the run to execute.")
-    parser.add_argument('--total_parts', type=int, required=False, help="Total parts in this run.")
+    parser = argparse.ArgumentParser(description="Run HDPSM for a year range")
+    parser.add_argument('--start_year', type=int, required=True)
+    parser.add_argument('--end_year', type=int, required=True)
+    parser.add_argument('--part', type=int, required=False)
+    parser.add_argument('--total_parts', type=int, required=False)
+    parser.add_argument('--n_jobs', type=int, default=4)
+    parser.add_argument("--mode", type=str, default="full",
+                    choices=["full", "single", "chunk"])
+
+    parser.add_argument("--target_drug", type=str, default=None)
+
+    parser.add_argument("--start", type=int, default=0)
+
+    parser.add_argument("--end", type=int, default=None)
     return parser.parse_args()
+
+def process_drug_star(args):
+    return process_drug(*args)
 
 if __name__ == "__main__":
     args = parse_args()
-    print(f"Start Year: {args.start_year}")
-    print(f"End Year: {args.end_year}")
+    logger = setup_logger(args.part)
+    rng_global = np.random.default_rng(seed=42)
 
-    if not args.part is None:
-        if args.total_parts is None:
-            raise Exception("ERROR: --part was set but --total_parts was not. --total_parts must also be set when using --part.")
-        if args.part > args.total_parts:
-            raise Exception(f"ERROR: Part provided, {args.part}, is greater than the total parts, {args.total_parts}")
-        if args.part < 1:
-            raise Exception(f"ERROR: Part provided, {args.part}, was less than 1. Value must be between 1 and --total_parts.")
-
-    nreps = 10
-    match_ratio = 5    
-    start_year = args.start_year
-    end_year = args.end_year
-    compute_strategy = 'in_mem' # or could be 'in_db'
-
-    # in_db on 2004-2004: 
-    # python3 src/hdpsm.py  7091.22s user 8923.49s system 102% cpu 4:19:13.69 total
-    # in_mem on 2004-2004:
-    # python3 src/hdpsm.py  7089.12s user 8851.79s system 375% cpu 1:10:49.58 total
-
-    results_dir = os.path.join('results', f"{start_year}-{end_year}")
-
-    if not os.path.exists(results_dir):
-        raise Exception(f"Confounding matrices must be built first. No results found at {results_dir}")
-        
-    ind_drug_file = os.path.join(results_dir, 'indication_drug_associations.csv')
-    drug_drug_file = os.path.join(results_dir, 'drug_drug_associations.csv')
-
-    if not os.path.exists(ind_drug_file):
-        raise Exception(f"Confounding matrices must be built first. Indicaitond-drug assocations missing: {ind_drug_file}")
-    
-    if not os.path.exists(drug_drug_file):
-        raise Exception(f"Confounding matrices must be built first. Drug-drug assocations missing: {drug_drug_file}")
-
+    results_dir = Path("results") / f"{args.start_year}-{args.end_year}"
+    ind_drug_file = results_dir / "indication_drug_associations.csv"
+    drug_drug_file = results_dir / "drug_drug_associations.csv"
+    if not ind_drug_file.exists() or not drug_drug_file.exists():
+        raise FileNotFoundError("Missing confounding matrices CSVs.")
 
     ind_drug_df = pd.read_csv(ind_drug_file)
     drug_drug_df = pd.read_csv(drug_drug_file)
 
-    _ensure_drug_columns(ind_drug_df, 'drug_id', 'drug_name', 'drug')
-    _ensure_drug_columns(drug_drug_df, 'drug_id', 'drug_name', 'drug')
-    _ensure_drug_columns(drug_drug_df, 'conf_drug_id', 'conf_drug_name', 'conf_drug')
+    # FIX: PHI NaNs silently break GLP-1 structure
+    ind_drug_df["PHI"] = ind_drug_df["PHI"].fillna(0)
+    drug_drug_df["PHI"] = drug_drug_df["PHI"].fillna(0)
 
-    ind_drug_df['drug_id'] = ind_drug_df['drug_id'].astype(str)
-    drug_drug_df['drug_id'] = drug_drug_df['drug_id'].astype(str)
-    drug_drug_df['conf_drug_id'] = drug_drug_df['conf_drug_id'].astype(str)
+    # Expand directional drug-drug pairs
+    if {"drug1", "drug2"}.issubset(drug_drug_df.columns):
+        df1 = drug_drug_df.rename(columns={"drug1": "drug_id", "drug2": "conf_drug_id"})
+        df2 = drug_drug_df.rename(columns={"drug2": "drug_id", "drug1": "conf_drug_id"})
+        drug_drug_df = pd.concat([df1, df2], ignore_index=True)
 
-    ind_drug_df['drug'] = ind_drug_df['drug_id']
-    drug_drug_df['drug'] = drug_drug_df['drug_id']
-    drug_drug_df['conf_drug'] = drug_drug_df['conf_drug_id']
+    _ensure_drug_columns(ind_drug_df, "drug_id", "drug_name", "drug")
+    _ensure_drug_columns(drug_drug_df, "drug_id", "drug_name", "drug")
+    _ensure_drug_columns(drug_drug_df, "conf_drug_id", "conf_drug_name", "conf_drug")
+
+    ind_drug_df["drug_id"] = ind_drug_df["drug_id"].astype(str)
+    drug_drug_df["drug_id"] = drug_drug_df["drug_id"].astype(str)
+    drug_drug_df["conf_drug_id"] = drug_drug_df["conf_drug_id"].astype(str)
+    ind_drug_df["drug"] = ind_drug_df["drug_id"]
+    drug_drug_df["drug"] = drug_drug_df["drug_id"]
+    drug_drug_df["conf_drug"] = drug_drug_df["conf_drug_id"]
 
     drug_meta = _build_drug_metadata(ind_drug_df, drug_drug_df)
 
-    ind_drugs = set(ind_drug_df['drug_id'].unique())
-    drug_drugs = set(drug_drug_df['drug_id'].unique())
+    ind_drugs = set(ind_drug_df["drug_id"].unique())
+    drug_drugs = set(drug_drug_df["drug_id"].unique())
     common_drugs = sorted(ind_drugs & drug_drugs)
-    drug_id_col = 'drug_id'
-    drug_name_col = 'drug_name'
 
-    print(len(ind_drugs), len(drug_drugs), len(common_drugs))
+    if args.target_drug:
+        keywords = [k.lower() for k in args.target_drug.split(",")]
 
-    #print(common_drugs)
+        filtered = []
+        for d in common_drugs:
+            name = str(drug_meta.get(d, "")).lower()
+            if any(k in name for k in keywords):
+                filtered.append(d)
 
-    db = PostgresDB(verbose=False)
+        print(f"Filtering to {len(filtered)} drugs using target_drug")
+        common_drugs = filtered
 
-    drug2report = None
-    ind2report = None 
-    if compute_strategy == 'in_mem':
-        pkl_fp = os.path.join(results_dir, '_tmp_drug2report_ind2report.pkl')
-        if os.path.exists(pkl_fp,):
-            print("Found pickle file, will load report data from disk.")
-            with open(pkl_fp, 'rb') as fh:
-                drug2report, ind2report = pickle.load(fh)
-        else:
-            # load the drugs and indications data into local memory first
-            # may be prohbitively large for the system memory to handle for large year ranges
-            drug2report = defaultdict(set)
-            ind2report = defaultdict(set)
+    if args.part is not None:
+        if args.total_parts is None:
+            raise ValueError("--total_parts must be set when using --part")
 
-            query = f"""
-            select ingredient.ingredient_rxcui,
-                   ingredient.ingredient_concept_name,
-                   snomed_term,
-                   safetyreport_id
-            from drug
-            join ingredient on (ingredient.id = drug.id)
-            join safetyreport on (safetyreport.id = safetyreport_id)
-            join drug_indications using (drugindication)
-            where left(receivedate, 4)::int between {start_year} and {end_year}
-            """
-            results = db.execute_query(query)
-            for drug_id_value, drug_name_value, ind, reportid in results:
-                if drug_id_value is None:
-                    continue
-                drug_id_value = str(drug_id_value)
-                drug2report[drug_id_value].add(reportid)
-                ind2report[ind].add(reportid)
-                if drug_id_value not in drug_meta and drug_name_value:
-                    drug_meta[drug_id_value] = drug_name_value
-            
-            with open(pkl_fp, 'wb') as fh:
-                pickle.dump((drug2report, ind2report), fh)
-            
-    elif compute_strategy == 'in_db':
-        pass
+        if args.part < 1 or args.part > args.total_parts:
+            raise ValueError("--part must be between 1 and --total_parts")
+
+        part_size = int(np.ceil(len(common_drugs) / args.total_parts))
+
+        start_idx = (args.part - 1) * part_size
+        end_idx = min(start_idx + part_size, len(common_drugs))
+
+        common_drugs = common_drugs[start_idx:end_idx]
+
+        print(f"Running part {args.part}/{args.total_parts}: "
+              f"{start_idx}-{end_idx} ({len(common_drugs)} drugs)")
+
+    logger.info(f"Processing {len(common_drugs)} drugs (part {args.part}/{args.total_parts if args.total_parts else 1})")
+    os.makedirs(results_dir / "psmWnreps", exist_ok=True)
+
+    # Load cached mappings
+    cache_fp = results_dir / "_tmp_drug2report_ind2report.pkl"
+    if cache_fp.exists():
+        logger.info("Loading cached report mappings")
+        with open(cache_fp, "rb") as fh:
+            drug2report, ind2report = pickle.load(fh)
     else:
-        raise Exception(f"Unexpected compute strategy provided: {compute_strategy}. Expected 'in_mem' or 'in_db'")
-
-    matched_df = None
-    os.makedirs(os.path.join(results_dir, 'psm'), exist_ok=True)
-    logfh = open(f"logs/psm_{start_year}-{end_year}_{time.time()}.log", 'w')
-
-    if not args.part is None:
-        start_pos = int((float(args.part-1)/float(args.total_parts))*len(common_drugs))
-        stop_pos = int((float(args.part)/float(args.total_parts))*len(common_drugs))
-        print(f"Working on part {args.part} of {args.total_parts}. Will execute drugs in index range: ({start_pos}, {stop_pos}]")
-
-    for drugidx, drug in tqdm.tqdm(enumerate(common_drugs), total=len(common_drugs)):
-
-        if not (args.part is None) and not (start_pos <= drugidx < stop_pos):
-            continue
-        
-        drug_name_for_log = drug_meta.get(drug, drug)
-        print(f"Working on propensity score matching for {drug_name_for_log} [{drug}] ({drugidx+1} of {len(common_drugs)})")
-        per_drug_path = os.path.join(results_dir, 'psm', f"{drugidx}_{drug}.csv.gz")
-        if os.path.exists(per_drug_path):
-            print(' > Found preexisting run. Will load from there.')
-            if not args.part is None:
+        logger.info("Building report mappings from DB")
+        db = PostgresDB(verbose=False)
+        drug2report = defaultdict(set)
+        ind2report = defaultdict(set)
+        query = f"""
+        SELECT DISTINCT
+            d2r.rxcui, d.medicinalproduct, d.drugindication, r.safetyreportid
+        FROM openfda.drugs d
+        JOIN openfda.drug2rxcui d2r ON d.id = d2r.drug_id
+        JOIN openfda.reports r ON d.safetyreportid = r.safetyreportid
+        WHERE d.drugindication IS NOT NULL
+          AND EXTRACT(YEAR FROM r.receivedate) BETWEEN {args.start_year} AND {args.end_year}
+        """
+        for drug_id, drug_name, ind, report_id in db.execute_query(query):
+            if drug_id is None:
                 continue
-            drug_matched_df = pd.read_csv(per_drug_path)
-            if 'drug_id' not in drug_matched_df.columns:
-                drug_matched_df['drug_id'] = drug_matched_df['drug'].apply(_normalize)
-            if 'drug_name' not in drug_matched_df.columns:
-                drug_matched_df['drug_name'] = drug_matched_df['drug_id'].map(drug_meta).fillna(drug_matched_df['drug'])
-            if matched_df is None:
-                matched_df = drug_matched_df
-            else:
-                matched_df = pd.concat([matched_df, drug_matched_df])
-            continue
-        
-        # print(ind_drug_df.shape)
-        corr_inds = set(
-            ind_drug_df[(ind_drug_df[drug_id_col] == drug) & (ind_drug_df['PHI'] > 0)][
-                'indication'
-            ].unique()
+            drug_id = str(drug_id)
+            drug2report[drug_id].add(report_id)
+            ind2report[ind].add(report_id)
+            drug_meta.setdefault(drug_id, drug_name)
+        with open(cache_fp, "wb") as fh:
+            pickle.dump((drug2report, ind2report), fh)
+
+    # --- Sequential, memory-safe HDPSM loop ---
+    all_results = []
+
+    from multiprocessing import Pool, cpu_count
+
+    drug_args = [
+        (
+            drug_idx,
+            drug,
+            drug_meta,
+            ind_drug_df,
+            drug_drug_df,
+            drug2report,
+            ind2report,
+            results_dir,
+            42
         )
-        corr_drugs = set(
-            drug_drug_df[(drug_drug_df['drug_id'] == drug) & (drug_drug_df['PHI'] > 0)][
-                'conf_drug_id'
-            ].unique()
+        for drug_idx, drug in enumerate(common_drugs)
+    ]
+
+    n_jobs = args.n_jobs or max(1, cpu_count() - 1)
+
+    logger.info(f"Running Pool with {n_jobs} workers on {len(common_drugs)} drugs")
+
+    with Pool(processes=n_jobs) as pool:
+        results = list(
+            tqdm.tqdm(
+                pool.imap_unordered(process_drug_star, drug_args),
+                total=len(drug_args),
+                desc="Drugs (Pool)"
+            )
         )
-        # print(corr_inds)
-        
-        if drug2report is None:
-            query = f"""
-            select safetyreport_id
-            from drug
-            join ingredient on (ingredient.id = drug.id)
-            join safetyreport on (safetyreport.id = safetyreport_id)
-            where left(receivedate, 4)::int between {start_year} and {end_year}
-            and ingredient.ingredient_rxcui = '{drug}'
-            """
-            result = db.execute_query(query)
-            drug_report_ids = {row[0] for row in result if row[0] is not None}
-        else:
-            drug_report_ids = drug2report[drug]
-        
-        # print(drug_report_ids)
 
-        corr_inds_reports = defaultdict(set)
-        if ind2report is None:
-            escaped_corr_inds = [s.replace("'", "''") for s in corr_inds]
-            query = f"""
-            select snomed_term, safetyreport_id
-            from drug
-            join ingredient on (ingredient.id = drug.id)
-            join safetyreport on (safetyreport.id = safetyreport_id)
-            join drug_indications using (drugindication)
-            where left(receivedate, 4)::int between {start_year} and {end_year}
-            and snomed_term in ('{"', '".join(escaped_corr_inds)}');
-            """
-            result = db.execute_query(query)
-            for indication, reportid in result:
-                corr_inds_reports[indication].add(reportid)
-        else:
-            for corr_ind in corr_inds:
-                corr_inds_reports[corr_ind] = ind2report[corr_ind]
-        
-        corr_drugs_reports = defaultdict(set)
-        if corr_drugs:
-            if drug2report is None:
-                escaped_ids = [d.replace("'", "''") for d in corr_drugs]
-                query = f"""
-                select ingredient.ingredient_rxcui, safetyreport_id
-                from drug
-                join ingredient on (ingredient.id = drug.id)
-                join safetyreport on (safetyreport.id = safetyreport_id)
-                where left(receivedate, 4)::int between {start_year} and {end_year}
-                and ingredient.ingredient_rxcui in ('{"', '".join(escaped_ids)}');
-                """
-                result = db.execute_query(query)
-                for corr_drug_id, reportid in result:
-                    if corr_drug_id is None:
-                        continue
-                    corr_drugs_reports[str(corr_drug_id)].add(reportid)
-            else:
-                for corr_drug in corr_drugs:
-                    corr_drugs_reports[corr_drug] = drug2report[corr_drug]
-        
-        reports = defaultdict(set)
-        for indication in corr_inds:
-            for reportid in corr_inds_reports[indication]:
-                reports[reportid].add(indication)
-        for corr_drug in corr_drugs:
-            for reprotid in corr_drugs_reports[corr_drug]:
-                reports[reportid].add(corr_drug)
-        
-        features = sorted(corr_drugs | corr_inds)
-        X = np.zeros(shape=(len(reports), len(features)))
-        y = np.zeros(shape=(len(reports),))
-        sorted_reportids = sorted(reports.keys())
-        for i, reportid in enumerate(sorted_reportids):
-            for f in reports[reportid]:
-                j = features.index(f)
-                X[i,j] = 1
-            
-            if reportid in drug_report_ids:
-                y[i] = 1
-        
-        print(X.shape, X.sum(), X.sum()/(X.shape[0]*X.shape[1]))
-        print(y.shape, y.sum())
+    all_results = [r for r in results if r is not None]
 
-        n_samples = X.shape[0]
-        n_positives = int(y.sum())
-        n_negatives = n_samples - n_positives
+    # --- Save combined output ---
+    if all_results:
+        results_dir.mkdir(parents=True, exist_ok=True)
 
-        if n_samples > MAX_SAMPLES:
-            print(f"Downsampling from {n_samples} to {MAX_SAMPLES}...")
+        combined_fp = results_dir / f"hdpsm_nrep{NREPS}_mratio{MATCH_RATIO}_maxsamp{MAX_SAMPLES}wNREPS.csv.gz"
 
-            pos_indices = np.where(y == 1)[0]
-            neg_indices = np.where(y == 0)[0]
+        pd.concat(all_results, ignore_index=True).to_csv(
+            combined_fp,
+            index=False,
+            compression="gzip"
+        )
 
-            # We want to keep as many positives as possible without flipping the class ratio
-            max_pos_to_keep = min(len(pos_indices), MAX_SAMPLES // 2)
-            n_pos_to_keep = min(len(pos_indices), max_pos_to_keep)
-            n_neg_to_keep = MAX_SAMPLES - n_pos_to_keep
+        logger.info(f"Saved combined HDPSM results to {combined_fp}")
+    else:
+        logger.warning("No results to combine from HDPSM run.")
 
-            # Make sure we don't request more negatives than exist
-            n_neg_to_keep = min(MAX_SAMPLES - n_pos_to_keep, len(neg_indices))
-
-            # Adjust positive count again just in case (rare edge case)
-            n_pos_to_keep = min(len(pos_indices), MAX_SAMPLES - n_neg_to_keep)
-
-            # Randomly sample negatives
-            rng = np.random.default_rng(seed=42)
-            sampled_pos_indices = rng.choice(pos_indices, size=n_pos_to_keep, replace=False)
-            sampled_neg_indices = rng.choice(neg_indices, size=n_neg_to_keep, replace=False)
-
-            sampled_indices = np.concatenate([sampled_pos_indices, sampled_neg_indices])
-            rng.shuffle(sampled_indices)
-
-            X = X[sampled_indices]
-            y = y[sampled_indices]
-            sorted_reportids = np.array(sorted_reportids)[sampled_indices].tolist()
-
-            print(f"After downsampling: X.shape={X.shape}, positives={int(y.sum())}, negatives={X.shape[0] - int(y.sum())}")
-        
-        if y.sum() < 5:
-            # minimum number of reports for a given drug to run the analysis
-            continue
-
-        print('Training PSM model...')
-        clf = linear_model.LogisticRegression(max_iter=1000)
-        try:
-
-            auroc = cross_val_score(clf, X, y, cv=5, scoring='roc_auc')
-            print(f" AUROCs: {auroc}")
-            clf.fit(X, y)
-            probas = clf.predict_proba(X)[:,1]
-        except Exception as e:
-            print(f'ERROR: Failed for {drug_name_for_log} [{drug}] at fitting the model with exception: {e}. Skipping.')
-            logfh.write(f'ERROR: Failed for {drug_name_for_log} [{drug}] at fitting the model with exception: {e}\n')
-            continue
-
-        df = pd.DataFrame({
-            'report_id': sorted_reportids,
-            'treatment': y,
-            'propensity_score': probas
-        })
-        drug_matched_df = run_multiple_matchings(df, num_replicates=nreps, match_ratio=match_ratio)
-        drug_matched_df['drug'] = drug
-        drug_matched_df['drug_id'] = drug
-        drug_matched_df['drug_name'] = drug_name_for_log
-        drug_matched_df['auroc'] = np.mean(auroc)
-
-        drug_matched_df.to_csv(per_drug_path, index=False)
-        
-        if args.part is None:
-            if matched_df is None:
-                matched_df = drug_matched_df
-            else:
-                matched_df = pd.concat([matched_df, drug_matched_df], ignore_index=True)
-
-    if args.part is None:
-        matched_df.to_csv(os.path.join(results_dir, f'hdpsm_nrep{nreps}_mratio{match_ratio}_maxsamp{MAX_SAMPLES}.csv.gz'), index=False)
-        # clean up temporary individual files
-        # shutil.rmtree(os.path.join(results_dir, 'psm'))
-    
-    db.close()
+    logger.info("HDPSM run complete.")

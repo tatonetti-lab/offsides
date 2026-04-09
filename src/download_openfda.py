@@ -20,9 +20,9 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from tqdm import tqdm
 
 # --- CONFIG ---
-FILE_PATH = "openfda_downloads/2025-10-02.faers.download.html"  # your saved HTML fragment
+FILE_PATH = "/Users/nguyent46/Library/CloudStorage/OneDrive-Cedars-SinaiHealthSystem/Offsides/openfda_downloads/260223.htm"  # your saved HTML fragment
 BASE_URL  = "https://open.fda.gov/data/downloads/"              # for resolving relative hrefs
-OUT_DIR   = "openfda_downloads/files"
+OUT_DIR   = "openfda_downloads/Files"
 ALLOWED_EXT = {".zip", ".gz", ".json", ".csv", ".ndjson", ".xml"}
 DOMAIN_ALLOWLIST = {"download.open.fda.gov", "api.fda.gov", "open.fda.gov"}
 MAX_WORKERS = 4
@@ -31,7 +31,7 @@ TIMEOUT = 60
 RETRIES = 3
 
 # Optional: restrict to certain collections, e.g., ["faers", "drug/event"]
-FILTER_SUBSTRINGS = []  # e.g., ["faers"]
+FILTER_SUBSTRINGS = ["faers","drug/event/2025q4"]  # e.g., ["faers"]
 
 # --- Helpers ---
 

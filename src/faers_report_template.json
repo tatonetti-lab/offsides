@@ -1,0 +1,28 @@
+{
+  "report": [
+    "safetyreportid",
+    "serious",
+    "receivedate"
+  ],
+  "primarysource": [
+    "qualification"
+  ],
+  "patient": [
+    "patientonsetage",
+    "patientonsetageunit",
+    "patientsex",
+    "patientweight"
+  ],
+  "drug": [
+    "medicinalproduct",
+    "drugadministrationroute",
+    "drugindication"
+  ],
+  "openfda": [
+    "generic_name",
+    "rxcui"
+  ],
+  "reaction": [
+    "reactionmeddrapt"
+  ]
+}

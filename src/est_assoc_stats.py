@@ -20,7 +20,7 @@ from collections import defaultdict
 
 from build_confounding_matrices import PostgresDB
 
-MIN_REPORTS = 5
+MIN_REPORTS = 20
 
 
 def _normalize(value):
@@ -79,6 +79,10 @@ if __name__ == "__main__":
     )
     print("OK.")
 
+    print("Total PSM rows:", len(psm))
+    print("Num drugs:", len(drugs))
+
+
     drug_rea_fn = os.path.join('results', f'{start_year}-{end_year}', 'drug_reaction_associations.csv')
     print(f"Loading original association estimates from file: {drug_rea_fn}", end=' ')
     uncorrected_df = pd.read_csv(drug_rea_fn)
@@ -90,6 +94,7 @@ if __name__ == "__main__":
         uncorrected_df['reaction_id'] = uncorrected_df['reaction'].apply(_reaction_id)
     if 'reaction_name' not in uncorrected_df.columns:
         uncorrected_df['reaction_name'] = uncorrected_df.get('reaction', uncorrected_df['reaction_id'])
+    print("Uncorrected columns:", uncorrected_df.columns.tolist())
 
     uncorrected_df.rename(columns={
         'a': 'uncorrected_a',
@@ -120,15 +125,18 @@ if __name__ == "__main__":
     uncorrected_df = uncorrected_df[available_cols]
     #print(uncorrected_df.head())
     print('OK.')
+    # Prevent duplicate reaction_name columns during merge
+    if 'reaction_name' in uncorrected_df.columns:
+        uncorrected_df = uncorrected_df.drop(columns=['reaction_name'])
 
     # load report -> reaction data
     db = PostgresDB()
     print("Loading reaction data...", end=' ')
     query = f"""
-    select reactionmeddrapt, safetyreport_id
-    from reaction
-    join safetyreport on (safetyreport_id = safetyreport.id)
-    where LEFT(receivedate, 4)::int BETWEEN {start_year} AND {end_year}
+    select reactionmeddrapt, re.safetyreportid
+    from reactions re
+    join reports r on (re.safetyreportid = r.safetyreportid)
+    WHERE EXTRACT(YEAR FROM r.receivedate) BETWEEN {start_year} AND {end_year}
     """
     results = db.execute_query(query)
     report2reaction = defaultdict(set)
@@ -144,12 +152,16 @@ if __name__ == "__main__":
         reactions.add(reaction_id)
         reaction_name_map.setdefault(reaction_id, rea)
     print("OK.")
+    sample_db_report = next(iter(next(iter(reaction2report.values()))))
+    print("Sample DB safetyreportid:", sample_db_report, type(sample_db_report))
+
+    print("Num reactions:", len(reactions))
 
     print("Loading reported sex data...")
     query = f"""
-    select patientsex, safetyreport.id
-    from safetyreport
-    where LEFT(receivedate, 4)::int BETWEEN {start_year} AND {end_year}
+    select patientsex, safetyreportid
+    from reports
+    WHERE EXTRACT(YEAR FROM receivedate) BETWEEN {start_year} AND {end_year}
     and patientsex is not null
     and patientsex != '0'
     """
@@ -157,6 +169,8 @@ if __name__ == "__main__":
     sex2report = defaultdict(set)
     for sex, reportid, in tqdm.tqdm(results):
         sex2report[sex].add(reportid)
+
+    print("Sex report counts:", {k: len(v) for k, v in sex2report.items()})
 
     assocs = list()
 
@@ -173,8 +187,17 @@ if __name__ == "__main__":
             for sex in ('All', '1', '2'):
                 #print(f" Estimating associations statistics for {drug} replicate {rep+1} of {len(replicates)}.")
                 this_replicate = this_drug[this_drug['replicate']==rep]
-                treatment_reports = set(this_replicate[this_replicate['treatment']==1]['report_id'].unique())
-                control_reports = set(this_replicate[this_replicate['treatment']==0]['report_id'].unique())
+                treatment_reports = set(
+                    this_replicate[this_replicate['treatment'] == 1]['report_id']
+                    .astype(str)
+                    .unique()
+                )
+
+                control_reports = set(
+                    this_replicate[this_replicate['treatment'] == 0]['report_id']
+                    .astype(str)
+                    .unique()
+                )
 
                 if sex != 'All':
                     treatment_reports &= sex2report[sex]
@@ -212,9 +235,52 @@ if __name__ == "__main__":
                         PRR,
                         PHI,
                     ])
+    print("Total associations computed:", len(assocs))
 
     df = pd.DataFrame(assocs, columns=['drug_id', 'drug_name', 'reaction_id', 'reaction_name', 'patient_sex', 'replicate', 'a', 'b', 'c', 'd', 'OR', 'PRR', 'PHI'])
+    # ================= DEBUG BEFORE MERGE =================
+    print("\n=== DEBUG: MERGE KEYS ===")
+
+    print("PSM patient_sex values:", df['patient_sex'].unique()[:10])
+    print("Uncorrected patient_sex values:", uncorrected_df['patient_sex'].unique()[:10])
+
+    print("PSM drug_id dtype:", df['drug_id'].dtype)
+    print("Uncorrected drug_id dtype:", uncorrected_df['drug_id'].dtype)
+
+    print("PSM reaction_id sample:", df['reaction_id'].iloc[0], type(df['reaction_id'].iloc[0]))
+    print("Uncorrected reaction_id sample:",
+          uncorrected_df['reaction_id'].iloc[0],
+          type(uncorrected_df['reaction_id'].iloc[0]))
+
+    print("Number of exact key overlaps:",
+          len(
+              set(
+                  zip(
+                      df['drug_id'],
+                      df['reaction_id'],
+                      df['patient_sex']
+                  )
+              )
+              &
+              set(
+                  zip(
+                      uncorrected_df['drug_id'],
+                      uncorrected_df['reaction_id'],
+                      uncorrected_df['patient_sex']
+                  )
+              )
+          )
+    )
+    print("========================================\n")
+    # =====================================================
+
     df = pd.merge(df, uncorrected_df, on=['drug_id', 'reaction_id', 'patient_sex'], how='left')
+    print(
+        "Non-null uncorrected_a:",
+        df['uncorrected_a'].notna().sum(),
+        "out of",
+        len(df)
+    )
 
     os.makedirs(f'./results/{start_year}-{end_year}', exist_ok=True)
     ofn = f'./results/{start_year}-{end_year}/{psm_file.split(".")[0]}_drug_reaction_associations.csv'

@@ -424,6 +424,77 @@ class OpenFDALoader:
                     sql.Identifier(self.schema)
                 )
             )
+            # =====================================================
+            # OFFSIDES / SCRUB PERFORMANCE INDEXES
+            # =====================================================
+
+            # ---------- DRUG TABLE ----------
+            cur.execute(
+                sql.SQL(
+                    "CREATE INDEX IF NOT EXISTS drugs_id_idx "
+                    "ON {}.drugs(id)"
+                ).format(sql.Identifier(self.schema))
+            )
+
+            cur.execute(
+                sql.SQL(
+                    "CREATE INDEX IF NOT EXISTS drugs_lower_name_idx "
+                    "ON {}.drugs (LOWER(medicinalproduct))"
+                ).format(sql.Identifier(self.schema))
+            )
+
+            # ---------- REACTIONS TABLE ----------
+            cur.execute(
+                sql.SQL(
+                    "CREATE INDEX IF NOT EXISTS reactions_meddra_idx "
+                    "ON {}.reactions(reactionmeddrapt)"
+                ).format(sql.Identifier(self.schema))
+            )
+
+            # MOST IMPORTANT INDEX FOR OFFSIDES
+            cur.execute(
+                sql.SQL(
+                    "CREATE INDEX IF NOT EXISTS reactions_pair_idx "
+                    "ON {}.reactions(reactionmeddrapt, safetyreportid)"
+                ).format(sql.Identifier(self.schema))
+            )
+
+            cur.execute(
+                sql.SQL(
+                    "CREATE INDEX IF NOT EXISTS reactions_report_meddra_idx "
+                    "ON {}.reactions(safetyreportid, reactionmeddrapt)"
+                ).format(sql.Identifier(self.schema))
+            )
+
+            # ---------- DRUG2RXCUI ----------
+            cur.execute(
+                sql.SQL(
+                    "CREATE INDEX IF NOT EXISTS drug2rxcui_drug_idx "
+                    "ON {}.drug2rxcui(drug_id)"
+                ).format(sql.Identifier(self.schema))
+            )
+
+            # ---------- REPORT FILTERING ----------
+            cur.execute(
+                sql.SQL(
+                    "CREATE INDEX IF NOT EXISTS reports_country_idx "
+                    "ON {}.reports(primarysourcecountry)"
+                ).format(sql.Identifier(self.schema))
+            )
+
+            cur.execute(
+                sql.SQL(
+                    "CREATE INDEX IF NOT EXISTS reports_serious_idx "
+                    "ON {}.reports(serious)"
+                ).format(sql.Identifier(self.schema))
+            )
+
+            cur.execute(
+                sql.SQL(
+                    "CREATE INDEX IF NOT EXISTS reports_date_serious_idx "
+                    "ON {}.reports(receivedate, serious)"
+                ).format(sql.Identifier(self.schema))
+            )
         self.conn.commit()
 
     def _prepare_staging_tables(self) -> None:
@@ -852,6 +923,57 @@ class OpenFDALoader:
 
         self.stats["drug2rxcui"] = total
 
+    def create_drug_ingredient(self) -> None:
+        """Create drug_ingredient table linking reports to ingredient RxCUIs."""
+        self._status("creating drug_ingredient table")
+
+        drop_sql = sql.SQL(
+            "DROP TABLE IF EXISTS {}.drug_ingredient"
+        ).format(sql.Identifier(self.schema))
+
+        create_sql = sql.SQL(
+            """
+            CREATE TABLE {}.drug_ingredient AS
+            SELECT DISTINCT
+                d.safetyreportid,
+                d2r.rxcui AS ingredient_rxcui
+            FROM {}.drugs d
+            JOIN {}.drug2rxcui d2r
+              ON d.id = d2r.drug_id
+            WHERE d2r.rxcui IS NOT NULL
+            """
+        ).format(
+            sql.Identifier(self.schema),
+            sql.Identifier(self.schema),
+            sql.Identifier(self.schema),
+        )
+
+        with self.conn.cursor() as cur:
+            cur.execute(drop_sql)
+            cur.execute(create_sql)
+
+            # Helpful indexes for OFFSIDES joins
+            cur.execute(
+                sql.SQL(
+                    "CREATE INDEX IF NOT EXISTS drug_ingredient_report_idx "
+                    "ON {}.drug_ingredient (safetyreportid)"
+                ).format(sql.Identifier(self.schema))
+            )
+
+            cur.execute(
+                sql.SQL(
+                    "CREATE INDEX IF NOT EXISTS drug_ingredient_rxcui_idx "
+                    "ON {}.drug_ingredient (ingredient_rxcui)"
+                ).format(sql.Identifier(self.schema))
+            )
+            cur.execute(
+                sql.SQL(
+                    "CREATE INDEX IF NOT EXISTS drug_ingredient_pair_idx "
+                    "ON {}.drug_ingredient (ingredient_rxcui, safetyreportid)"
+                ).format(sql.Identifier(self.schema))
+            )
+        self.conn.commit()
+
     def _relative_path(self, path: Path) -> str:
         try:
             return str(path.relative_to(self.input_dir))
@@ -955,7 +1077,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--config", default=Path("config.json"), type=Path, help="Database config JSON path")
     parser.add_argument(
         "--input-dir",
-        default=Path("openfda_downloads/files/download.open.fda.gov/drug/event"),
+        default=Path("/data/home/nguyent/event"),
         type=Path,
         help="Root directory of downloaded OpenFDA files",
     )
@@ -976,6 +1098,7 @@ def main() -> None:
             loader.create_schema(drop_existing=args.drop_schema)
         loader.process_directory(limit_files=args.limit_files)
         loader.populate_drug_rxcui()
+        loader.create_drug_ingredient()
         print("Insertion stats:")
         for name, count in sorted(loader.stats.items()):
             if name == "drug_rxcui_stage":
